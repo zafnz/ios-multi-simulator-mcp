@@ -39,6 +39,7 @@ All tools take a required `id` (session identifier) parameter.
 | `start_simulator` | `type?` (e.g. "iPhone", "iPad", "iPhone 16 Pro") | Creates, boots, and opens a simulator for the session |
 | `destroy_simulator` | — | Shuts down and deletes the session's simulator |
 | `attach_simulator` | `udid` | Attaches to an existing booted simulator by UDID |
+| `detect_rotation` | — | Detects device rotation and updates coordinate mapping |
 | `ui_describe_all` | — | Returns accessibility tree for the entire screen (JSON) |
 | `ui_tap` | `x`, `y`, `duration?` | Tap at coordinates |
 | `ui_type` | `text` | Type text into the focused field |

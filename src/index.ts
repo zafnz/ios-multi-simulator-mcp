@@ -200,7 +200,9 @@ interface Frame {
 
 /**
  * Determines the effective orientation for a session given the screen dimensions.
- * "auto" detects portrait (w <= h) vs landscape_right (w > h).
+ * Uses the cached detected orientation if available, otherwise falls back to
+ * simple width/height comparison (which can't distinguish landscape_right from
+ * landscape_left, or portrait from upside_down).
  */
 function getEffectiveOrientation(
   orientation: Orientation,
@@ -212,78 +214,193 @@ function getEffectiveOrientation(
 }
 
 /**
- * Transforms a frame from describe_all's rotated logical space to portrait space.
- * screenW/screenH are the root frame dimensions from describe_all.
+ * Collects all labeled, non-full-screen elements from the accessibility tree.
  */
-function transformFrame(
-  frame: Frame,
-  orientation: Orientation,
+function collectProbeCandiates(
+  els: any[],
   screenW: number,
   screenH: number
-): Frame {
-  switch (orientation) {
-    case "portrait":
-    case "auto":
-      return frame;
+): { frame: Frame; label: string }[] {
+  const results: { frame: Frame; label: string }[] = [];
+  for (const el of els) {
+    if (el.frame && el.frame.width && el.frame.height && el.AXLabel) {
+      // Skip full-screen elements
+      if (
+        !(
+          el.frame.x === 0 &&
+          el.frame.y === 0 &&
+          el.frame.width === screenW &&
+          el.frame.height === screenH
+        )
+      ) {
+        results.push({ frame: el.frame, label: el.AXLabel });
+      }
+    }
+    if (el.children && Array.isArray(el.children)) {
+      results.push(...collectProbeCandiates(el.children, screenW, screenH));
+    }
+  }
+  return results;
+}
 
-    case "landscape_right":
-      return {
-        x: frame.y,
-        y: screenW - frame.x - frame.width,
-        width: frame.height,
-        height: frame.width,
-      };
+/**
+ * Probes the simulator to auto-detect the exact rotation by cross-referencing
+ * describe_all (rotated logical coords) with describe_point (portrait coord input).
+ *
+ * Algorithm:
+ * 1. Collect all labeled elements from describe_all
+ * 2. Filter to elements with unique labels (avoid ambiguous matches)
+ * 3. For each candidate element, compute its portrait-space center under both
+ *    possible orientations, then call describe_point at each position
+ * 4. If the element is found at exactly one position, that's our orientation
+ * 5. If found at both or neither, try the next element
+ *
+ * Returns a safe default on any failure — detection is best-effort.
+ */
+async function detectOrientation(udid: string): Promise<Orientation> {
+  try {
+    const { stdout } = await idb(
+      "ui",
+      "describe-all",
+      "--udid",
+      udid,
+      "--json",
+      "--nested"
+    );
+    const elements = JSON.parse(stdout);
+    const rootFrame = elements[0]?.frame;
+    if (!rootFrame || !rootFrame.width || !rootFrame.height) {
+      return "portrait"; // still booting or degenerate frame
+    }
 
-    case "landscape_left":
-      return {
-        x: screenH - frame.y - frame.height,
-        y: frame.x,
-        width: frame.height,
-        height: frame.width,
-      };
+    const screenW: number = rootFrame.width;
+    const screenH: number = rootFrame.height;
+    const isLandscape = screenW > screenH;
 
-    case "upside_down":
-      return {
-        x: screenW - frame.x - frame.width,
-        y: screenH - frame.y - frame.height,
-        width: frame.width,
-        height: frame.height,
-      };
+    // Collect all candidate elements and filter to unique labels
+    const allCandidates = collectProbeCandiates(elements, screenW, screenH);
+    const labelCounts = new Map<string, number>();
+    for (const c of allCandidates) {
+      labelCounts.set(c.label, (labelCounts.get(c.label) || 0) + 1);
+    }
+    const uniqueCandidates = allCandidates.filter(
+      (c) => labelCounts.get(c.label) === 1
+    );
+
+    // Try each unique element as a probe
+    for (const probe of uniqueCandidates) {
+      const centerX = probe.frame.x + probe.frame.width / 2;
+      const centerY = probe.frame.y + probe.frame.height / 2;
+
+      // Compute portrait-space coordinates for each candidate orientation
+      const orientations: { orientation: Orientation; x: number; y: number }[] =
+        isLandscape
+          ? [
+              {
+                orientation: "landscape_right",
+                x: centerY,
+                y: screenW - centerX,
+              },
+              {
+                orientation: "landscape_left",
+                x: screenH - centerY,
+                y: centerX,
+              },
+            ]
+          : [
+              {
+                orientation: "portrait",
+                x: centerX,
+                y: centerY,
+              },
+              {
+                orientation: "upside_down",
+                x: screenW - centerX,
+                y: screenH - centerY,
+              },
+            ];
+
+      // Probe both positions
+      const matches: Orientation[] = [];
+      for (const candidate of orientations) {
+        try {
+          const { stdout: pointOutput } = await idb(
+            "ui",
+            "describe-point",
+            "--udid",
+            udid,
+            "--json",
+            "--",
+            String(Math.round(candidate.x)),
+            String(Math.round(candidate.y))
+          );
+          const pointElement = JSON.parse(pointOutput);
+          if (pointElement.AXLabel === probe.label) {
+            matches.push(candidate.orientation);
+          }
+        } catch {
+          // probe failed, skip this position
+        }
+      }
+
+      // Exactly one match = definitive answer
+      if (matches.length === 1) {
+        return matches[0];
+      }
+      // Both or neither matched — ambiguous, try next element
+    }
+
+    // Fallback if no element gave a definitive answer
+    return isLandscape ? "landscape_right" : "portrait";
+  } catch {
+    // Detection is best-effort; degrade gracefully
+    return "portrait";
   }
 }
 
 /**
- * Formats a frame as an AXFrame string: "{{x, y}, {width, height}}"
+ * Transforms a logical-space point (x, y) to portrait space for IDB input.
+ * screenW/screenH are the logical dimensions from describe_all (e.g. 1376x1032 for landscape).
  */
-function formatAXFrame(frame: Frame): string {
-  return `{{${frame.x}, ${frame.y}}, {${frame.width}, ${frame.height}}}`;
-}
-
-/**
- * Recursively transforms all frames in a describe_all/describe_point JSON tree.
- */
-function transformElementTree(
-  elements: any[],
+function transformPointToPortrait(
+  x: number,
+  y: number,
   orientation: Orientation,
   screenW: number,
   screenH: number
-): any[] {
-  return elements.map((el) => {
-    const transformed = { ...el };
-    if (el.frame && (el.frame.width || el.frame.height)) {
-      transformed.frame = transformFrame(el.frame, orientation, screenW, screenH);
-      transformed.AXFrame = formatAXFrame(transformed.frame);
-    }
-    if (el.children && Array.isArray(el.children)) {
-      transformed.children = transformElementTree(
-        el.children,
-        orientation,
-        screenW,
-        screenH
-      );
-    }
-    return transformed;
-  });
+): { x: number; y: number } {
+  switch (orientation) {
+    case "portrait":
+    case "auto":
+      return { x, y };
+    case "landscape_right":
+      return { x: y, y: screenW - x };
+    case "landscape_left":
+      return { x: screenH - y, y: x };
+    case "upside_down":
+      return { x: screenW - x, y: screenH - y };
+  }
+}
+
+/**
+ * Gets the logical screen dimensions from describe_all.
+ * Returns the root frame width/height, which are in rotated logical space.
+ */
+async function getScreenDimensions(
+  udid: string
+): Promise<{ width: number; height: number } | null> {
+  const { stdout } = await idb(
+    "ui",
+    "describe-all",
+    "--udid",
+    udid,
+    "--json",
+    "--nested"
+  );
+  const elements = JSON.parse(stdout);
+  const frame = elements[0]?.frame;
+  if (!frame || !frame.width || !frame.height) return null;
+  return { width: frame.width, height: frame.height };
 }
 
 // --- Server setup ---
@@ -295,7 +412,7 @@ const server = new McpServer(
   },
   {
     instructions:
-      "iOS Simulator MCP server. Use ui_describe_all to find tap coordinates — its frame values map directly to ui_tap coordinates in all orientations. Do not derive tap coordinates from ui_view screenshots, as they may not match the logical coordinate system (especially when the device is rotated). ui_view is useful for visual verification but ui_describe_all is the reliable way to navigate.",
+      "iOS Simulator MCP server. All coordinates are in logical screen space — what you see on screen is what you use. ui_describe_all returns element positions in logical coordinates; pass those same coordinates to ui_tap, ui_swipe, and ui_describe_point. ui_view shows screenshots rotated to match the logical orientation. Do not derive tap coordinates from ui_view screenshots, as they may not match the logical coordinate system (especially when the device is rotated). ui_view is useful for visual verification but ui_describe_all is the reliable way to navigate.",
   }
 );
 
@@ -540,30 +657,19 @@ if (!isToolFiltered("attach_simulator")) {
   );
 }
 
-if (!isToolFiltered("set_rotation_coords")) {
+if (!isToolFiltered("detect_rotation")) {
   server.tool(
-    "set_rotation_coords",
-    "Sets the coordinate rotation mapping for a session. By default (auto), portrait and landscape_right are detected automatically. Use this to override when the simulator is in landscape_left or upside_down orientation.",
+    "detect_rotation",
+    "Detects the current device rotation by probing the simulator's accessibility tree. Call this after the device has been rotated to update the coordinate mapping. Returns the detected orientation (portrait, landscape_right, landscape_left, or upside_down).",
     {
       id: sessionIdSchema,
-      orientation: z
-        .enum([
-          "auto",
-          "portrait",
-          "landscape_right",
-          "upside_down",
-          "landscape_left",
-        ])
-        .describe(
-          "The device orientation. 'auto' detects portrait vs landscape_right."
-        ),
     },
     {
-      title: "Set Rotation Coordinates",
-      readOnlyHint: false,
+      title: "Detect Rotation",
+      readOnlyHint: true,
       openWorldHint: false,
     },
-    async ({ id, orientation }) => {
+    async ({ id }) => {
       try {
         const sim = managedSimulators.get(id);
         if (!sim) {
@@ -572,14 +678,15 @@ if (!isToolFiltered("set_rotation_coords")) {
           );
         }
 
-        sim.orientation = orientation as Orientation;
+        const detected = await detectOrientation(sim.udid);
+        sim.orientation = detected;
 
         return {
           isError: false,
           content: [
             {
               type: "text",
-              text: `Coordinate rotation set to "${orientation}" for session "${id}".`,
+              text: `Detected orientation: "${detected}" for session "${id}".`,
             },
           ],
         };
@@ -589,7 +696,7 @@ if (!isToolFiltered("set_rotation_coords")) {
           content: [
             {
               type: "text",
-              text: `Error setting rotation: ${toError(error).message}`,
+              text: `Error detecting rotation: ${toError(error).message}`,
             },
           ],
         };
@@ -624,32 +731,16 @@ if (!isToolFiltered("ui_describe_all")) {
           "--nested"
         );
 
+        // Check for still-booting (0x0 frame)
         const elements = JSON.parse(stdout);
         const screenFrame = elements[0]?.frame;
-
-        if (screenFrame && (screenFrame.width || screenFrame.height)) {
-          const orientation = getEffectiveOrientation(
-            sim.orientation,
-            screenFrame.width,
-            screenFrame.height
+        if (screenFrame && !screenFrame.width && !screenFrame.height) {
+          throw new Error(
+            "Simulator is still booting. Wait a few seconds and try again."
           );
-
-          if (orientation !== "portrait") {
-            const transformed = transformElementTree(
-              elements,
-              orientation,
-              screenFrame.width,
-              screenFrame.height
-            );
-            return {
-              isError: false,
-              content: [
-                { type: "text", text: JSON.stringify(transformed) },
-              ],
-            };
-          }
         }
 
+        // Return raw IDB output — it's already in logical screen space
         return {
           isError: false,
           content: [{ type: "text", text: stdout }],
@@ -688,21 +779,45 @@ if (!isToolFiltered("ui_tap")) {
     { title: "UI Tap", readOnlyHint: false, openWorldHint: true },
     async ({ id, duration, x, y }) => {
       try {
-        const udid = getManagedSimulatorId(id);
+        const sim = managedSimulators.get(id);
+        if (!sim) {
+          throw new Error(
+            `No simulator is running for session "${id}". Call start_simulator first.`
+          );
+        }
+
+        // Transform logical coords to portrait space for IDB
+        const dims = await getScreenDimensions(sim.udid);
+        if (dims) {
+          const orientation = getEffectiveOrientation(
+            sim.orientation,
+            dims.width,
+            dims.height
+          );
+          const pt = transformPointToPortrait(
+            x,
+            y,
+            orientation,
+            dims.width,
+            dims.height
+          );
+          x = pt.x;
+          y = pt.y;
+        }
 
         const { stderr } = await idb(
           "ui",
           "tap",
           "--udid",
-          udid,
+          sim.udid,
           ...(duration ? ["--duration", duration] : []),
           "--json",
           // When passing user-provided values to a command, it's crucial to use `--`
           // to separate the command's options from positional arguments.
           // This prevents the shell from misinterpreting the arguments as options.
           "--",
-          String(x),
-          String(y)
+          String(Math.round(x)),
+          String(Math.round(y))
         );
 
         if (stderr) throw new Error(stderr);
@@ -807,13 +922,46 @@ if (!isToolFiltered("ui_swipe")) {
     { title: "UI Swipe", readOnlyHint: false, openWorldHint: true },
     async ({ id, duration, x_start, y_start, x_end, y_end, delta }) => {
       try {
-        const udid = getManagedSimulatorId(id);
+        const sim = managedSimulators.get(id);
+        if (!sim) {
+          throw new Error(
+            `No simulator is running for session "${id}". Call start_simulator first.`
+          );
+        }
+
+        // Transform logical coords to portrait space for IDB
+        const dims = await getScreenDimensions(sim.udid);
+        if (dims) {
+          const orientation = getEffectiveOrientation(
+            sim.orientation,
+            dims.width,
+            dims.height
+          );
+          const ptStart = transformPointToPortrait(
+            x_start,
+            y_start,
+            orientation,
+            dims.width,
+            dims.height
+          );
+          const ptEnd = transformPointToPortrait(
+            x_end,
+            y_end,
+            orientation,
+            dims.width,
+            dims.height
+          );
+          x_start = ptStart.x;
+          y_start = ptStart.y;
+          x_end = ptEnd.x;
+          y_end = ptEnd.y;
+        }
 
         const { stderr } = await idb(
           "ui",
           "swipe",
           "--udid",
-          udid,
+          sim.udid,
           ...(duration ? ["--duration", duration] : []),
           ...(delta ? ["--delta", String(delta)] : []),
           "--json",
@@ -821,10 +969,10 @@ if (!isToolFiltered("ui_swipe")) {
           // to separate the command's options from positional arguments.
           // This prevents the shell from misinterpreting the arguments as options.
           "--",
-          String(x_start),
-          String(y_start),
-          String(x_end),
-          String(y_end)
+          String(Math.round(x_start)),
+          String(Math.round(y_start)),
+          String(Math.round(x_end)),
+          String(Math.round(y_end))
         );
 
         if (stderr) throw new Error(stderr);
@@ -869,6 +1017,27 @@ if (!isToolFiltered("ui_describe_point")) {
           );
         }
 
+        // Transform logical coords to portrait space for IDB
+        const dims = await getScreenDimensions(sim.udid);
+        let idbX = x;
+        let idbY = y;
+        if (dims) {
+          const orientation = getEffectiveOrientation(
+            sim.orientation,
+            dims.width,
+            dims.height
+          );
+          const pt = transformPointToPortrait(
+            x,
+            y,
+            orientation,
+            dims.width,
+            dims.height
+          );
+          idbX = pt.x;
+          idbY = pt.y;
+        }
+
         const { stdout, stderr } = await idb(
           "ui",
           "describe-point",
@@ -879,47 +1048,16 @@ if (!isToolFiltered("ui_describe_point")) {
           // to separate the command's options from positional arguments.
           // This prevents the shell from misinterpreting the arguments as options.
           "--",
-          String(x),
-          String(y)
+          String(Math.round(idbX)),
+          String(Math.round(idbY))
         );
 
         if (stderr) throw new Error(stderr);
 
-        // Transform the returned frame to portrait coordinates if rotated
-        const element = JSON.parse(stdout);
-
-        if (element.frame && (element.frame.width || element.frame.height)) {
-          const { stdout: allOutput } = await idb(
-            "ui",
-            "describe-all",
-            "--udid",
-            sim.udid,
-            "--json",
-            "--nested"
-          );
-          const allData = JSON.parse(allOutput);
-          const screenFrame = allData[0]?.frame;
-          if (screenFrame) {
-            const orientation = getEffectiveOrientation(
-              sim.orientation,
-              screenFrame.width,
-              screenFrame.height
-            );
-            if (orientation !== "portrait") {
-              element.frame = transformFrame(
-                element.frame,
-                orientation,
-                screenFrame.width,
-                screenFrame.height
-              );
-              element.AXFrame = formatAXFrame(element.frame);
-            }
-          }
-        }
-
+        // Return raw IDB output — it's already in logical screen space
         return {
           isError: false,
-          content: [{ type: "text", text: JSON.stringify(element) }],
+          content: [{ type: "text", text: stdout }],
         };
       } catch (error) {
         return {
@@ -948,14 +1086,19 @@ if (!isToolFiltered("ui_view")) {
     { title: "View Screenshot", readOnlyHint: true, openWorldHint: true },
     async ({ id }) => {
       try {
-        const udid = getManagedSimulatorId(id);
+        const sim = managedSimulators.get(id);
+        if (!sim) {
+          throw new Error(
+            `No simulator is running for session "${id}". Call start_simulator first.`
+          );
+        }
 
         // Get screen dimensions in points from ui_describe_all
         const { stdout: uiDescribeOutput } = await idb(
           "ui",
           "describe-all",
           "--udid",
-          udid,
+          sim.udid,
           "--json",
           "--nested"
         );
@@ -966,7 +1109,7 @@ if (!isToolFiltered("ui_view")) {
           throw new Error("Could not determine screen dimensions");
         }
 
-        // Always use portrait dimensions (screenshot is in portrait pixel orientation)
+        // Always use portrait dimensions for initial resize (screenshot is in portrait pixel orientation)
         const pointWidth = Math.min(screenFrame.width, screenFrame.height);
         const pointHeight = Math.max(screenFrame.width, screenFrame.height);
 
@@ -976,9 +1119,19 @@ if (!isToolFiltered("ui_view")) {
           );
         }
 
+        const orientation = getEffectiveOrientation(
+          sim.orientation,
+          screenFrame.width,
+          screenFrame.height
+        );
+
         // Generate unique file names with timestamp
         const ts = Date.now();
         const rawPng = path.join(TMP_ROOT_DIR, `ui-view-${ts}-raw.png`);
+        const resizedJpg = path.join(
+          TMP_ROOT_DIR,
+          `ui-view-${ts}-resized.jpg`
+        );
         const compressedJpg = path.join(
           TMP_ROOT_DIR,
           `ui-view-${ts}-compressed.jpg`
@@ -988,15 +1141,14 @@ if (!isToolFiltered("ui_view")) {
         await run("xcrun", [
           "simctl",
           "io",
-          udid,
+          sim.udid,
           "screenshot",
           "--type=png",
           "--",
           rawPng,
         ]);
 
-        // Resize to logical point dimensions and compress to JPEG.
-        // This ensures pixel coordinates in the image match idb tap coordinates.
+        // Resize to portrait point dimensions and compress to JPEG
         await run("sips", [
           "-z",
           String(pointHeight),
@@ -1009,8 +1161,36 @@ if (!isToolFiltered("ui_view")) {
           "80", // 80% quality
           rawPng,
           "--out",
-          compressedJpg,
+          resizedJpg,
         ]);
+
+        // Rotate to match logical orientation
+        // sips --rotate rotates counter-clockwise
+        let rotateDegrees: number | null = null;
+        switch (orientation) {
+          case "landscape_right":
+            rotateDegrees = 90;
+            break;
+          case "landscape_left":
+            rotateDegrees = 270;
+            break;
+          case "upside_down":
+            rotateDegrees = 180;
+            break;
+        }
+
+        if (rotateDegrees !== null) {
+          await run("sips", [
+            "--rotate",
+            String(rotateDegrees),
+            resizedJpg,
+            "--out",
+            compressedJpg,
+          ]);
+        } else {
+          // No rotation needed — just use the resized file
+          fs.copyFileSync(resizedJpg, compressedJpg);
+        }
 
         // Read and encode the compressed image
         const imageData = fs.readFileSync(compressedJpg);
