@@ -11,6 +11,10 @@ import fs from "fs";
 
 const execFileAsync = promisify(execFile);
 
+const PACKAGE_VERSION: string = JSON.parse(
+  fs.readFileSync(path.join(__dirname, "..", "package.json"), "utf-8")
+).version;
+
 const TMP_ROOT_DIR = fs.mkdtempSync(
   path.join(os.tmpdir(), "ios-simulator-mcp-")
 );
@@ -33,11 +37,10 @@ async function run(
 }
 
 /**
- * Gets the IDB command path from environment variable or defaults to "idb"
- * @returns The path to the IDB executable
- * @throws Error if custom path is specified but doesn't exist
+ * Resolves the IDB command path from environment variable or defaults to "idb".
+ * Validated once at startup.
  */
-function getIdbPath(): string {
+const idbPath: string = (() => {
   const customPath = process.env.IOS_SIMULATOR_MCP_IDB_PATH;
 
   if (customPath) {
@@ -57,7 +60,7 @@ function getIdbPath(): string {
   }
 
   return "idb";
-}
+})();
 
 /**
  * Runs the idb command with the given arguments
@@ -66,7 +69,7 @@ function getIdbPath(): string {
  * @see https://fbidb.io/docs/commands for documentation of available idb commands
  */
 async function idb(...args: string[]) {
-  return run(getIdbPath(), args);
+  return run(idbPath, args);
 }
 
 // Read filtered tools from environment variable
@@ -89,11 +92,10 @@ type Orientation =
   | "upside_down"
   | "landscape_left";
 
+type SimSession = { udid: string; name: string; owned: boolean; orientation: Orientation; screenDims: { width: number; height: number } | null };
+
 /** Tracks managed simulators by session id */
-const managedSimulators = new Map<
-  string,
-  { udid: string; name: string; owned: boolean; orientation: Orientation }
->();
+const managedSimulators = new Map<string, SimSession>();
 
 /** Tracks active recording processes by session id */
 const activeRecordings = new Map<string, import("child_process").ChildProcess>();
@@ -102,20 +104,21 @@ const activeRecordings = new Map<string, import("child_process").ChildProcess>()
 const sessionIdSchema = z
   .string()
   .max(128)
+  .regex(/^[a-zA-Z0-9_-]+$/, "Session ID must contain only alphanumeric characters, hyphens, and underscores")
   .describe("Unique identifier for your session");
 
 /**
- * Returns the UDID of the managed simulator for the given session id.
+ * Returns the managed simulator session for the given session id.
  * Throws if no simulator exists for that session.
  */
-function getManagedSimulatorId(id: string): string {
+function getManagedSim(id: string): SimSession {
   const sim = managedSimulators.get(id);
   if (!sim) {
     throw new Error(
       `No simulator is running for session "${id}". Call start_simulator first.`
     );
   }
-  return sim.udid;
+  return sim;
 }
 
 /**
@@ -176,19 +179,14 @@ async function findLatestRuntime(): Promise<string> {
  * Cleans up all managed simulators (shutdown + delete). Ignores errors.
  */
 async function cleanupAllSimulators(): Promise<void> {
-  for (const [id, { udid, owned }] of managedSimulators) {
-    if (!owned) continue;
-    try {
-      await run("xcrun", ["simctl", "shutdown", udid]);
-    } catch {
-      // Ignore - might already be shut down
-    }
-    try {
-      await run("xcrun", ["simctl", "delete", udid]);
-    } catch {
-      // Ignore cleanup errors
-    }
-  }
+  await Promise.allSettled(
+    [...managedSimulators.values()]
+      .filter(({ owned }) => owned)
+      .map(async ({ udid }) => {
+        try { await run("xcrun", ["simctl", "shutdown", udid]); } catch { /* may already be shut down */ }
+        try { await run("xcrun", ["simctl", "delete", udid]); } catch { /* ignore cleanup errors */ }
+      })
+  );
   managedSimulators.clear();
 }
 
@@ -219,7 +217,7 @@ function getEffectiveOrientation(
 /**
  * Collects all labeled, non-full-screen elements from the accessibility tree.
  */
-function collectProbeCandiates(
+function collectProbeCandidates(
   els: any[],
   screenW: number,
   screenH: number
@@ -240,7 +238,7 @@ function collectProbeCandiates(
       }
     }
     if (el.children && Array.isArray(el.children)) {
-      results.push(...collectProbeCandiates(el.children, screenW, screenH));
+      results.push(...collectProbeCandidates(el.children, screenW, screenH));
     }
   }
   return results;
@@ -281,7 +279,7 @@ async function detectOrientation(udid: string): Promise<Orientation> {
     const isLandscape = screenW > screenH;
 
     // Collect all candidate elements and filter to unique labels
-    const allCandidates = collectProbeCandiates(elements, screenW, screenH);
+    const allCandidates = collectProbeCandidates(elements, screenW, screenH);
     const labelCounts = new Map<string, number>();
     for (const c of allCandidates) {
       labelCounts.set(c.label, (labelCounts.get(c.label) || 0) + 1);
@@ -386,24 +384,37 @@ function transformPointToPortrait(
 }
 
 /**
- * Gets the logical screen dimensions from describe_all.
- * Returns the root frame width/height, which are in rotated logical space.
+ * Gets the logical screen dimensions, using the cached value from the session
+ * if available (populated by ui_describe_all / detect_rotation), otherwise
+ * falls back to a fresh describe-all call and caches the result.
  */
 async function getScreenDimensions(
-  udid: string
+  sim: SimSession
 ): Promise<{ width: number; height: number } | null> {
+  if (sim.screenDims) return sim.screenDims;
+
   const { stdout } = await idb(
     "ui",
     "describe-all",
     "--udid",
-    udid,
+    sim.udid,
     "--json",
     "--nested"
   );
   const elements = JSON.parse(stdout);
   const frame = elements[0]?.frame;
   if (!frame || !frame.width || !frame.height) return null;
-  return { width: frame.width, height: frame.height };
+  sim.screenDims = { width: frame.width, height: frame.height };
+  return sim.screenDims;
+}
+
+/**
+ * Extracts and caches screen dimensions from a parsed describe-all root frame.
+ */
+function cacheScreenDims(sim: SimSession, frame: { width: number; height: number }): void {
+  if (frame.width && frame.height) {
+    sim.screenDims = { width: frame.width, height: frame.height };
+  }
 }
 
 // --- Server setup ---
@@ -411,7 +422,7 @@ async function getScreenDimensions(
 const server = new McpServer(
   {
     name: "ios-simulator",
-    version: require("../package.json").version,
+    version: PACKAGE_VERSION,
   },
   {
     instructions:
@@ -441,6 +452,20 @@ function errorWithTroubleshooting(message: string): string {
   return `${message}\n\nFor help, see the ${troubleshootingLink()}`;
 }
 
+async function handleToolError(
+  errorPrefix: string,
+  fn: () => Promise<any>
+) {
+  try {
+    return await fn();
+  } catch (error) {
+    return {
+      isError: true as const,
+      content: [{ type: "text" as const, text: errorWithTroubleshooting(`${errorPrefix}: ${toError(error).message}`) }],
+    };
+  }
+}
+
 // --- Tool registrations ---
 
 if (!isToolFiltered("start_simulator")) {
@@ -457,8 +482,8 @@ if (!isToolFiltered("start_simulator")) {
         ),
     },
     { title: "Start Simulator", readOnlyHint: false, openWorldHint: true },
-    async ({ id, type }) => {
-      try {
+    async ({ id, type }) =>
+      handleToolError("Error starting simulator", async () => {
         const existing = managedSimulators.get(id);
         if (existing) {
           throw new Error(
@@ -493,6 +518,7 @@ if (!isToolFiltered("start_simulator")) {
           name: deviceName,
           owned: true,
           orientation: "auto",
+          screenDims: null,
         });
 
         return {
@@ -504,20 +530,7 @@ if (!isToolFiltered("start_simulator")) {
             },
           ],
         };
-      } catch (error) {
-        return {
-          isError: true,
-          content: [
-            {
-              type: "text",
-              text: errorWithTroubleshooting(
-                `Error starting simulator: ${toError(error).message}`
-              ),
-            },
-          ],
-        };
-      }
-    }
+      })
   );
 }
 
@@ -529,19 +542,12 @@ if (!isToolFiltered("destroy_simulator")) {
       id: sessionIdSchema,
     },
     { title: "Destroy Simulator", readOnlyHint: false, openWorldHint: true },
-    async ({ id }) => {
-      try {
-        const sim = managedSimulators.get(id);
-        if (!sim) {
-          throw new Error(
-            `No simulator is running for session "${id}".`
-          );
-        }
-
-        const { name, udid, owned } = sim;
+    async ({ id }) =>
+      handleToolError("Error destroying simulator", async () => {
+        const { name, udid, owned } = getManagedSim(id);
 
         if (owned) {
-          await run("xcrun", ["simctl", "shutdown", udid]);
+          try { await run("xcrun", ["simctl", "shutdown", udid]); } catch { /* may already be shut down */ }
           await run("xcrun", ["simctl", "delete", udid]);
         }
 
@@ -558,20 +564,7 @@ if (!isToolFiltered("destroy_simulator")) {
             },
           ],
         };
-      } catch (error) {
-        return {
-          isError: true,
-          content: [
-            {
-              type: "text",
-              text: errorWithTroubleshooting(
-                `Error destroying simulator: ${toError(error).message}`
-              ),
-            },
-          ],
-        };
-      }
-    }
+      })
   );
 }
 
@@ -589,8 +582,8 @@ if (!isToolFiltered("attach_simulator")) {
         .describe("UDID of the simulator to attach to"),
     },
     { title: "Attach Simulator", readOnlyHint: false, openWorldHint: true },
-    async ({ id, udid }) => {
-      try {
+    async ({ id, udid }) =>
+      handleToolError("Error attaching to simulator", async () => {
         const existing = managedSimulators.get(id);
         if (existing) {
           throw new Error(
@@ -632,6 +625,7 @@ if (!isToolFiltered("attach_simulator")) {
           name: found.name,
           owned: false,
           orientation: "auto",
+          screenDims: null,
         });
 
         return {
@@ -643,20 +637,7 @@ if (!isToolFiltered("attach_simulator")) {
             },
           ],
         };
-      } catch (error) {
-        return {
-          isError: true,
-          content: [
-            {
-              type: "text",
-              text: errorWithTroubleshooting(
-                `Error attaching to simulator: ${toError(error).message}`
-              ),
-            },
-          ],
-        };
-      }
-    }
+      })
   );
 }
 
@@ -672,15 +653,10 @@ if (!isToolFiltered("detect_rotation")) {
       readOnlyHint: true,
       openWorldHint: false,
     },
-    async ({ id }) => {
-      try {
-        const sim = managedSimulators.get(id);
-        if (!sim) {
-          throw new Error(
-            `No simulator is running for session "${id}". Call start_simulator first.`
-          );
-        }
-
+    async ({ id }) =>
+      handleToolError("Error detecting rotation", async () => {
+        const sim = getManagedSim(id);
+        sim.screenDims = null; // invalidate — rotation changes logical dimensions
         const detected = await detectOrientation(sim.udid);
         sim.orientation = detected;
 
@@ -693,18 +669,7 @@ if (!isToolFiltered("detect_rotation")) {
             },
           ],
         };
-      } catch (error) {
-        return {
-          isError: true,
-          content: [
-            {
-              type: "text",
-              text: `Error detecting rotation: ${toError(error).message}`,
-            },
-          ],
-        };
-      }
-    }
+      })
   );
 }
 
@@ -716,14 +681,9 @@ if (!isToolFiltered("ui_describe_all")) {
       id: sessionIdSchema,
     },
     { title: "Describe All UI Elements", readOnlyHint: true, openWorldHint: true },
-    async ({ id }) => {
-      try {
-        const sim = managedSimulators.get(id);
-        if (!sim) {
-          throw new Error(
-            `No simulator is running for session "${id}". Call start_simulator first.`
-          );
-        }
+    async ({ id }) =>
+      handleToolError("Error describing all of the ui", async () => {
+        const sim = getManagedSim(id);
 
         const { stdout } = await idb(
           "ui",
@@ -743,25 +703,17 @@ if (!isToolFiltered("ui_describe_all")) {
           );
         }
 
+        // Cache screen dimensions so subsequent tap/swipe/describe_point avoid an extra IDB call
+        if (screenFrame) {
+          cacheScreenDims(sim, screenFrame);
+        }
+
         // Return raw IDB output — it's already in logical screen space
         return {
           isError: false,
           content: [{ type: "text", text: stdout }],
         };
-      } catch (error) {
-        return {
-          isError: true,
-          content: [
-            {
-              type: "text",
-              text: errorWithTroubleshooting(
-                `Error describing all of the ui: ${toError(error).message}`
-              ),
-            },
-          ],
-        };
-      }
-    }
+      })
   );
 }
 
@@ -780,17 +732,12 @@ if (!isToolFiltered("ui_tap")) {
       y: z.number().describe("The y-coordinate"),
     },
     { title: "UI Tap", readOnlyHint: false, openWorldHint: true },
-    async ({ id, duration, x, y }) => {
-      try {
-        const sim = managedSimulators.get(id);
-        if (!sim) {
-          throw new Error(
-            `No simulator is running for session "${id}". Call start_simulator first.`
-          );
-        }
+    async ({ id, duration, x, y }) =>
+      handleToolError("Error tapping on the screen", async () => {
+        const sim = getManagedSim(id);
 
         // Transform logical coords to portrait space for IDB
-        const dims = await getScreenDimensions(sim.udid);
+        const dims = await getScreenDimensions(sim);
         if (dims) {
           const orientation = getEffectiveOrientation(
             sim.orientation,
@@ -829,20 +776,7 @@ if (!isToolFiltered("ui_tap")) {
           isError: false,
           content: [{ type: "text", text: "Tapped successfully" }],
         };
-      } catch (error) {
-        return {
-          isError: true,
-          content: [
-            {
-              type: "text",
-              text: errorWithTroubleshooting(
-                `Error tapping on the screen: ${toError(error).message}`
-              ),
-            },
-          ],
-        };
-      }
-    }
+      })
   );
 }
 
@@ -859,9 +793,9 @@ if (!isToolFiltered("ui_type")) {
         .describe("Text to input"),
     },
     { title: "UI Type", readOnlyHint: false, openWorldHint: true },
-    async ({ id, text }) => {
-      try {
-        const udid = getManagedSimulatorId(id);
+    async ({ id, text }) =>
+      handleToolError("Error typing text into the iOS Simulator", async () => {
+        const udid = getManagedSim(id).udid;
 
         const { stderr } = await idb(
           "ui",
@@ -881,22 +815,7 @@ if (!isToolFiltered("ui_type")) {
           isError: false,
           content: [{ type: "text", text: "Typed successfully" }],
         };
-      } catch (error) {
-        return {
-          isError: true,
-          content: [
-            {
-              type: "text",
-              text: errorWithTroubleshooting(
-                `Error typing text into the iOS Simulator: ${
-                  toError(error).message
-                }`
-              ),
-            },
-          ],
-        };
-      }
-    }
+      })
   );
 }
 
@@ -923,17 +842,12 @@ if (!isToolFiltered("ui_swipe")) {
         .default(1),
     },
     { title: "UI Swipe", readOnlyHint: false, openWorldHint: true },
-    async ({ id, duration, x_start, y_start, x_end, y_end, delta }) => {
-      try {
-        const sim = managedSimulators.get(id);
-        if (!sim) {
-          throw new Error(
-            `No simulator is running for session "${id}". Call start_simulator first.`
-          );
-        }
+    async ({ id, duration, x_start, y_start, x_end, y_end, delta }) =>
+      handleToolError("Error swiping on the screen", async () => {
+        const sim = getManagedSim(id);
 
         // Transform logical coords to portrait space for IDB
-        const dims = await getScreenDimensions(sim.udid);
+        const dims = await getScreenDimensions(sim);
         if (dims) {
           const orientation = getEffectiveOrientation(
             sim.orientation,
@@ -984,20 +898,7 @@ if (!isToolFiltered("ui_swipe")) {
           isError: false,
           content: [{ type: "text", text: "Swiped successfully" }],
         };
-      } catch (error) {
-        return {
-          isError: true,
-          content: [
-            {
-              type: "text",
-              text: errorWithTroubleshooting(
-                `Error swiping on the screen: ${toError(error).message}`
-              ),
-            },
-          ],
-        };
-      }
-    }
+      })
   );
 }
 
@@ -1011,17 +912,12 @@ if (!isToolFiltered("ui_describe_point")) {
       y: z.number().describe("The y-coordinate"),
     },
     { title: "Describe UI Point", readOnlyHint: true, openWorldHint: true },
-    async ({ id, x, y }) => {
-      try {
-        const sim = managedSimulators.get(id);
-        if (!sim) {
-          throw new Error(
-            `No simulator is running for session "${id}". Call start_simulator first.`
-          );
-        }
+    async ({ id, x, y }) =>
+      handleToolError(`Error describing point (${x}, ${y})`, async () => {
+        const sim = getManagedSim(id);
 
         // Transform logical coords to portrait space for IDB
-        const dims = await getScreenDimensions(sim.udid);
+        const dims = await getScreenDimensions(sim);
         let idbX = x;
         let idbY = y;
         if (dims) {
@@ -1062,20 +958,7 @@ if (!isToolFiltered("ui_describe_point")) {
           isError: false,
           content: [{ type: "text", text: stdout }],
         };
-      } catch (error) {
-        return {
-          isError: true,
-          content: [
-            {
-              type: "text",
-              text: errorWithTroubleshooting(
-                `Error describing point (${x}, ${y}): ${toError(error).message}`
-              ),
-            },
-          ],
-        };
-      }
-    }
+      })
   );
 }
 
@@ -1087,14 +970,9 @@ if (!isToolFiltered("ui_view")) {
       id: sessionIdSchema,
     },
     { title: "View Screenshot", readOnlyHint: true, openWorldHint: true },
-    async ({ id }) => {
-      try {
-        const sim = managedSimulators.get(id);
-        if (!sim) {
-          throw new Error(
-            `No simulator is running for session "${id}". Call start_simulator first.`
-          );
-        }
+    async ({ id }) =>
+      handleToolError("Error capturing screenshot", async () => {
+        const sim = getManagedSim(id);
 
         // Get screen dimensions in points from ui_describe_all
         const { stdout: uiDescribeOutput } = await idb(
@@ -1121,6 +999,8 @@ if (!isToolFiltered("ui_view")) {
             "Simulator is still booting. Wait a few seconds and try again."
           );
         }
+
+        cacheScreenDims(sim, screenFrame);
 
         const orientation = getEffectiveOrientation(
           sim.orientation,
@@ -1216,20 +1096,7 @@ if (!isToolFiltered("ui_view")) {
             try { fs.unlinkSync(f); } catch { /* may not exist */ }
           }
         }
-      } catch (error) {
-        return {
-          isError: true,
-          content: [
-            {
-              type: "text",
-              text: errorWithTroubleshooting(
-                `Error capturing screenshot: ${toError(error).message}`
-              ),
-            },
-          ],
-        };
-      }
-    }
+      })
   );
 }
 
@@ -1292,9 +1159,9 @@ if (!isToolFiltered("screenshot")) {
         ),
     },
     { title: "Take Screenshot", readOnlyHint: false, openWorldHint: true },
-    async ({ id, output_path, type, display, mask }) => {
-      try {
-        const udid = getManagedSimulatorId(id);
+    async ({ id, output_path, type, display, mask }) =>
+      handleToolError("Error taking screenshot", async () => {
+        const udid = getManagedSim(id).udid;
         const absolutePath = ensureAbsolutePath(output_path);
 
         // command is weird, it responds with stderr on success and stdout is blank
@@ -1327,20 +1194,7 @@ if (!isToolFiltered("screenshot")) {
             },
           ],
         };
-      } catch (error) {
-        return {
-          isError: true,
-          content: [
-            {
-              type: "text",
-              text: errorWithTroubleshooting(
-                `Error taking screenshot: ${toError(error).message}`
-              ),
-            },
-          ],
-        };
-      }
-    }
+      })
   );
 }
 
@@ -1383,9 +1237,9 @@ if (!isToolFiltered("record_video")) {
         ),
     },
     { title: "Record Video", readOnlyHint: false, openWorldHint: true },
-    async ({ id, output_path, codec, display, mask, force }) => {
-      try {
-        const udid = getManagedSimulatorId(id);
+    async ({ id, output_path, codec, display, mask, force }) =>
+      handleToolError("Error starting recording", async () => {
+        const udid = getManagedSim(id).udid;
 
         if (activeRecordings.has(id)) {
           throw new Error(
@@ -1480,20 +1334,7 @@ if (!isToolFiltered("record_video")) {
             },
           ],
         };
-      } catch (error) {
-        return {
-          isError: true,
-          content: [
-            {
-              type: "text",
-              text: errorWithTroubleshooting(
-                `Error starting recording: ${toError(error).message}`
-              ),
-            },
-          ],
-        };
-      }
-    }
+      })
   );
 }
 
@@ -1505,9 +1346,9 @@ if (!isToolFiltered("stop_recording")) {
       id: sessionIdSchema,
     },
     { title: "Stop Recording", readOnlyHint: false, openWorldHint: true },
-    async ({ id }) => {
-      try {
-        getManagedSimulatorId(id); // validates session exists
+    async ({ id }) =>
+      handleToolError("Error stopping recording", async () => {
+        getManagedSim(id); // validates session exists
 
         const proc = activeRecordings.get(id);
         if (!proc) {
@@ -1531,20 +1372,7 @@ if (!isToolFiltered("stop_recording")) {
             },
           ],
         };
-      } catch (error) {
-        return {
-          isError: true,
-          content: [
-            {
-              type: "text",
-              text: errorWithTroubleshooting(
-                `Error stopping recording: ${toError(error).message}`
-              ),
-            },
-          ],
-        };
-      }
-    }
+      })
   );
 }
 
@@ -1562,9 +1390,9 @@ if (!isToolFiltered("install_app")) {
         ),
     },
     { title: "Install App", readOnlyHint: false, openWorldHint: true },
-    async ({ id, app_path }) => {
-      try {
-        const udid = getManagedSimulatorId(id);
+    async ({ id, app_path }) =>
+      handleToolError("Error installing app", async () => {
+        const udid = getManagedSim(id).udid;
         const absolutePath = path.isAbsolute(app_path)
           ? app_path
           : path.resolve(app_path);
@@ -1587,20 +1415,7 @@ if (!isToolFiltered("install_app")) {
             },
           ],
         };
-      } catch (error) {
-        return {
-          isError: true,
-          content: [
-            {
-              type: "text",
-              text: errorWithTroubleshooting(
-                `Error installing app: ${toError(error).message}`
-              ),
-            },
-          ],
-        };
-      }
-    }
+      })
   );
 }
 
@@ -1624,9 +1439,9 @@ if (!isToolFiltered("launch_app")) {
         ),
     },
     { title: "Launch App", readOnlyHint: false, openWorldHint: true },
-    async ({ id, bundle_id, terminate_running }) => {
-      try {
-        const udid = getManagedSimulatorId(id);
+    async ({ id, bundle_id, terminate_running }) =>
+      handleToolError("Error launching app", async () => {
+        const udid = getManagedSim(id).udid;
 
         // run() will throw if the command fails (non-zero exit code)
         // Note: simctl doesn't support -- as an option terminator
@@ -1654,20 +1469,7 @@ if (!isToolFiltered("launch_app")) {
             },
           ],
         };
-      } catch (error) {
-        return {
-          isError: true,
-          content: [
-            {
-              type: "text",
-              text: errorWithTroubleshooting(
-                `Error launching app: ${toError(error).message}`
-              ),
-            },
-          ],
-        };
-      }
-    }
+      })
   );
 }
 
