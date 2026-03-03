@@ -730,9 +730,17 @@ if (!isToolFiltered("ui_tap")) {
         .describe("Press duration"),
       x: z.number().describe("The x-coordinate"),
       y: z.number().describe("The y-coordinate"),
+      count: z
+        .number()
+        .int()
+        .min(1)
+        .max(10)
+        .optional()
+        .default(1)
+        .describe("Number of taps to perform (default 1). Use 2 for double-tap."),
     },
     { title: "UI Tap", readOnlyHint: false, openWorldHint: true },
-    async ({ id, duration, x, y }) =>
+    async ({ id, duration, x, y, count }) =>
       handleToolError("Error tapping on the screen", async () => {
         const sim = getManagedSim(id);
 
@@ -755,26 +763,27 @@ if (!isToolFiltered("ui_tap")) {
           y = pt.y;
         }
 
-        const { stderr } = await idb(
+        const tapArgs = [
           "ui",
           "tap",
           "--udid",
           sim.udid,
           ...(duration ? ["--duration", duration] : []),
           "--json",
-          // When passing user-provided values to a command, it's crucial to use `--`
-          // to separate the command's options from positional arguments.
-          // This prevents the shell from misinterpreting the arguments as options.
           "--",
           String(Math.round(x)),
-          String(Math.round(y))
-        );
+          String(Math.round(y)),
+        ];
 
-        if (stderr) throw new Error(stderr);
+        for (let i = 0; i < count; i++) {
+          if (i > 0) await new Promise((r) => setTimeout(r, 50));
+          const { stderr } = await idb(...tapArgs);
+          if (stderr) throw new Error(stderr);
+        }
 
         return {
           isError: false,
-          content: [{ type: "text", text: "Tapped successfully" }],
+          content: [{ type: "text", text: count > 1 ? `Tapped ${count} times successfully` : "Tapped successfully" }],
         };
       })
   );
