@@ -95,6 +95,9 @@ const managedSimulators = new Map<
   { udid: string; name: string; owned: boolean; orientation: Orientation }
 >();
 
+/** Tracks active recording processes by session id */
+const activeRecordings = new Map<string, import("child_process").ChildProcess>();
+
 /** Zod schema for the session id parameter, reused across all tools */
 const sessionIdSchema = z
   .string()
@@ -431,7 +434,7 @@ function toError(input: unknown): Error {
 }
 
 function troubleshootingLink(): string {
-  return "[Troubleshooting Guide](https://github.com/joshuayoes/ios-simulator-mcp/blob/main/TROUBLESHOOTING.md) | [Plain Text Guide for LLMs](https://raw.githubusercontent.com/joshuayoes/ios-simulator-mcp/refs/heads/main/TROUBLESHOOTING.md)";
+  return "[Troubleshooting Guide](https://github.com/zafnz/ios-simulator-mcp/blob/main/TROUBLESHOOTING.md) | [Plain Text Guide for LLMs](https://raw.githubusercontent.com/zafnz/ios-simulator-mcp/refs/heads/main/TROUBLESHOOTING.md)";
 }
 
 function errorWithTroubleshooting(message: string): string {
@@ -1127,89 +1130,92 @@ if (!isToolFiltered("ui_view")) {
 
         // Generate unique file names with timestamp
         const ts = Date.now();
-        const rawPng = path.join(TMP_ROOT_DIR, `ui-view-${ts}-raw.png`);
-        const resizedJpg = path.join(
-          TMP_ROOT_DIR,
-          `ui-view-${ts}-resized.jpg`
-        );
-        const compressedJpg = path.join(
-          TMP_ROOT_DIR,
-          `ui-view-${ts}-compressed.jpg`
-        );
+        const tmpFiles = [
+          path.join(TMP_ROOT_DIR, `ui-view-${ts}-raw.png`),
+          path.join(TMP_ROOT_DIR, `ui-view-${ts}-resized.jpg`),
+          path.join(TMP_ROOT_DIR, `ui-view-${ts}-rotated.jpg`),
+        ];
+        const [rawPng, resizedJpg, rotatedJpg] = tmpFiles;
 
-        // Capture screenshot as PNG (always in physical portrait pixel orientation)
-        await run("xcrun", [
-          "simctl",
-          "io",
-          sim.udid,
-          "screenshot",
-          "--type=png",
-          "--",
-          rawPng,
-        ]);
-
-        // Resize to portrait point dimensions and compress to JPEG
-        await run("sips", [
-          "-z",
-          String(pointHeight),
-          String(pointWidth),
-          "-s",
-          "format",
-          "jpeg",
-          "-s",
-          "formatOptions",
-          "80", // 80% quality
-          rawPng,
-          "--out",
-          resizedJpg,
-        ]);
-
-        // Rotate to match logical orientation
-        // sips --rotate rotates counter-clockwise
-        let rotateDegrees: number | null = null;
-        switch (orientation) {
-          case "landscape_right":
-            rotateDegrees = 90;
-            break;
-          case "landscape_left":
-            rotateDegrees = 270;
-            break;
-          case "upside_down":
-            rotateDegrees = 180;
-            break;
-        }
-
-        if (rotateDegrees !== null) {
-          await run("sips", [
-            "--rotate",
-            String(rotateDegrees),
-            resizedJpg,
-            "--out",
-            compressedJpg,
+        try {
+          // Capture screenshot as PNG (always in physical portrait pixel orientation)
+          await run("xcrun", [
+            "simctl",
+            "io",
+            sim.udid,
+            "screenshot",
+            "--type=png",
+            "--",
+            rawPng,
           ]);
-        } else {
-          // No rotation needed — just use the resized file
-          fs.copyFileSync(resizedJpg, compressedJpg);
+
+          // Resize to portrait point dimensions and compress to JPEG
+          await run("sips", [
+            "-z",
+            String(pointHeight),
+            String(pointWidth),
+            "-s",
+            "format",
+            "jpeg",
+            "-s",
+            "formatOptions",
+            "80", // 80% quality
+            rawPng,
+            "--out",
+            resizedJpg,
+          ]);
+
+          // Rotate to match logical orientation
+          // sips --rotate rotates counter-clockwise
+          let rotateDegrees: number | null = null;
+          switch (orientation) {
+            case "landscape_right":
+              rotateDegrees = 90;
+              break;
+            case "landscape_left":
+              rotateDegrees = 270;
+              break;
+            case "upside_down":
+              rotateDegrees = 180;
+              break;
+          }
+
+          let finalFile = resizedJpg;
+          if (rotateDegrees !== null) {
+            await run("sips", [
+              "--rotate",
+              String(rotateDegrees),
+              resizedJpg,
+              "--out",
+              rotatedJpg,
+            ]);
+            finalFile = rotatedJpg;
+          }
+
+          // Read and encode the final image
+          const imageData = fs.readFileSync(finalFile);
+          const base64Data = imageData.toString("base64");
+
+          return {
+            isError: false,
+            content: [
+              {
+                type: "image",
+                data: base64Data,
+                mimeType: "image/jpeg",
+              },
+              {
+                type: "text",
+                text: "Screenshot captured",
+              },
+            ],
+          };
+        } finally {
+          // Clean up temp files
+          for (const f of tmpFiles) {
+            try { fs.unlinkSync(f); } catch { /* may not exist */ }
+          }
         }
-
-        // Read and encode the compressed image
-        const imageData = fs.readFileSync(compressedJpg);
-        const base64Data = imageData.toString("base64");
-
-        return {
-          isError: false,
-          content: [
-            {
-              type: "image",
-              data: base64Data,
-              mimeType: "image/jpeg",
-            },
-            {
-              type: "text",
-              text: "Screenshot captured",
-            },
-          ],
-        };
       } catch (error) {
         return {
           isError: true,
@@ -1380,10 +1386,16 @@ if (!isToolFiltered("record_video")) {
     async ({ id, output_path, codec, display, mask, force }) => {
       try {
         const udid = getManagedSimulatorId(id);
+
+        if (activeRecordings.has(id)) {
+          throw new Error(
+            `A recording is already in progress for session "${id}". Call stop_recording first.`
+          );
+        }
+
         const defaultFileName = `simulator_recording_${Date.now()}.mp4`;
         const outputFile = ensureAbsolutePath(output_path ?? defaultFileName);
 
-        // Start the recording process
         const recordingProcess = spawn("xcrun", [
           "simctl",
           "io",
@@ -1400,27 +1412,63 @@ if (!isToolFiltered("record_video")) {
           outputFile,
         ]);
 
-        // Wait for recording to start
-        await new Promise((resolve, reject) => {
+        // Wait for recording to start or fail
+        await new Promise<void>((resolve, reject) => {
           let errorOutput = "";
+          let settled = false;
+
+          const settle = (fn: () => void) => {
+            if (!settled) {
+              settled = true;
+              fn();
+            }
+          };
 
           recordingProcess.stderr.on("data", (data) => {
             const message = data.toString();
             if (message.includes("Recording started")) {
-              resolve(true);
+              settle(() => resolve());
             } else {
               errorOutput += message;
             }
           });
 
-          // Set timeout for start verification
+          recordingProcess.on("close", (code) => {
+            settle(() =>
+              reject(
+                new Error(
+                  errorOutput.trim() ||
+                    `Recording process exited with code ${code}`
+                )
+              )
+            );
+          });
+
+          recordingProcess.on("error", (err) => {
+            settle(() => reject(err));
+          });
+
           setTimeout(() => {
-            if (recordingProcess.killed) {
-              reject(new Error("Recording process terminated unexpectedly"));
-            } else {
-              resolve(true);
-            }
+            settle(() => {
+              if (recordingProcess.exitCode !== null) {
+                reject(
+                  new Error(
+                    errorOutput.trim() || "Recording process exited unexpectedly"
+                  )
+                );
+              } else {
+                // Process is still running but never emitted "Recording started" — assume it's working
+                resolve();
+              }
+            });
           }, 3000);
+        });
+
+        activeRecordings.set(id, recordingProcess);
+
+        // Clean up map entry when process exits
+        recordingProcess.on("close", () => {
+          activeRecordings.delete(id);
         });
 
         return {
@@ -1452,15 +1500,24 @@ if (!isToolFiltered("record_video")) {
 if (!isToolFiltered("stop_recording")) {
   server.tool(
     "stop_recording",
-    "Stops the simulator video recording using killall",
+    "Stops the simulator video recording",
     {
       id: sessionIdSchema,
     },
     { title: "Stop Recording", readOnlyHint: false, openWorldHint: true },
     async ({ id }) => {
       try {
-        const udid = getManagedSimulatorId(id);
-        await run("pkill", ["-SIGINT", "-f", `simctl io ${udid} recordVideo`]);
+        getManagedSimulatorId(id); // validates session exists
+
+        const proc = activeRecordings.get(id);
+        if (!proc) {
+          throw new Error(
+            `No active recording for session "${id}".`
+          );
+        }
+
+        // Send SIGINT to gracefully stop simctl recordVideo (lets it finalize the file)
+        proc.kill("SIGINT");
 
         // Wait a moment for the video to finalize
         await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -1518,6 +1575,7 @@ if (!isToolFiltered("install_app")) {
         }
 
         // run() will throw if the command fails (non-zero exit code)
+        // Note: simctl doesn't support -- as an option terminator; path is validated above via existsSync
         await run("xcrun", ["simctl", "install", udid, absolutePath]);
 
         return {
@@ -1571,6 +1629,7 @@ if (!isToolFiltered("launch_app")) {
         const udid = getManagedSimulatorId(id);
 
         // run() will throw if the command fails (non-zero exit code)
+        // Note: simctl doesn't support -- as an option terminator
         const { stdout } = await run("xcrun", [
           "simctl",
           "launch",
@@ -1619,13 +1678,23 @@ async function runServer() {
 
 runServer().catch(console.error);
 
-process.stdin.on("close", async () => {
-  console.log("iOS Simulator MCP Server closed");
+let cleaningUp = false;
+async function shutdown() {
+  if (cleaningUp) return;
+  cleaningUp = true;
   server.close();
+  // Kill any active recordings so their processes don't outlive us
+  for (const proc of activeRecordings.values()) {
+    try { proc.kill("SIGINT"); } catch { /* ignore */ }
+  }
   await cleanupAllSimulators();
   try {
     fs.rmSync(TMP_ROOT_DIR, { recursive: true, force: true });
-  } catch (error) {
+  } catch {
     // Ignore cleanup errors
   }
-});
+}
+
+process.stdin.on("close", shutdown);
+process.on("SIGINT", async () => { await shutdown(); process.exit(0); });
+process.on("SIGTERM", async () => { await shutdown(); process.exit(0); });
