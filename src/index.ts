@@ -1545,14 +1545,21 @@ function createServer(): McpServer {
  *   --transport <stdio|http>    select transport
  *   --host <addr>               HTTP bind address
  *   --port <n>                  HTTP port
- * Each flag also accepts the `--flag=value` form.
+ *   --verbose | -v              log client connections and calls (http mode)
+ * Each value flag also accepts the `--flag=value` form.
  */
 function parseArgs(argv: string[]): {
   transport?: string;
   host?: string;
   port?: string;
+  verbose?: boolean;
 } {
-  const out: { transport?: string; host?: string; port?: string } = {};
+  const out: {
+    transport?: string;
+    host?: string;
+    port?: string;
+    verbose?: boolean;
+  } = {};
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     const eq = arg.indexOf("=");
@@ -1577,12 +1584,19 @@ function parseArgs(argv: string[]): {
       case "--port":
         out.port = value();
         break;
+      case "--verbose":
+      case "-v":
+        out.verbose = true;
+        break;
     }
   }
   return out;
 }
 
 const cliArgs = parseArgs(process.argv.slice(2));
+
+const envTruthy = (v: string | undefined) =>
+  ["1", "true", "yes"].includes((v ?? "").toLowerCase());
 
 /** Resolved transport config: CLI flag > env var > default. */
 const config = {
@@ -1593,7 +1607,36 @@ const config = {
   ).toLowerCase(),
   host: cliArgs.host || process.env.IOS_SIMULATOR_MCP_HTTP_HOST || "127.0.0.1",
   port: Number(cliArgs.port || process.env.IOS_SIMULATOR_MCP_HTTP_PORT || "8008"),
+  verbose:
+    cliArgs.verbose || envTruthy(process.env.IOS_SIMULATOR_MCP_VERBOSE),
 };
+
+/**
+ * Logs a human-readable line to stderr when verbose mode is enabled. Used in
+ * HTTP mode to surface client connections and tool calls. stderr never carries
+ * MCP protocol traffic, so this is safe in any transport.
+ */
+function vlog(message: string): void {
+  if (!config.verbose) return;
+  console.error(`[${new Date().toISOString()}] ${message}`);
+}
+
+/**
+ * Produces a short, human-readable summary of a JSON-RPC request body for
+ * verbose logging, e.g. `session "qa-a" ui_tap`, `initialize`, `tools/list`.
+ */
+function summarizeRpc(body: unknown): string {
+  const one = (msg: any): string => {
+    if (!msg || typeof msg !== "object") return "?";
+    if (msg.method === "tools/call") {
+      const name = msg.params?.name ?? "?";
+      const sid = msg.params?.arguments?.id;
+      return sid ? `session "${sid}" ${name}` : name;
+    }
+    return msg.method ?? "response";
+  };
+  return Array.isArray(body) ? body.map(one).join(", ") : one(body);
+}
 
 /** Whether owned simulators are destroyed when the server process shuts down. */
 const CLEANUP_ON_EXIT =
@@ -1634,6 +1677,7 @@ async function runHttp() {
   const { host, port } = config;
 
   const httpServer = http.createServer(async (req, res) => {
+    const peer = `${req.socket.remoteAddress}:${req.socket.remotePort}`;
     // Route: only POST /mcp is served. Stateless mode has no server-push (GET)
     // or session teardown (DELETE), so those return 405.
     const url = (req.url || "").split("?")[0];
@@ -1666,6 +1710,7 @@ async function runHttp() {
 
     try {
       const body = await readJsonBody(req);
+      vlog(`${peer} ${summarizeRpc(body)}`);
       await server.connect(transport);
       await transport.handleRequest(req, res, body);
     } catch (err) {
@@ -1681,11 +1726,21 @@ async function runHttp() {
     }
   });
 
+  // Verbose: surface raw TCP connect/disconnect so client comings-and-goings
+  // are visible even between requests.
+  httpServer.on("connection", (socket) => {
+    const peer = `${socket.remoteAddress}:${socket.remotePort}`;
+    vlog(`client ${peer} connected`);
+    socket.on("close", () => vlog(`client ${peer} disconnected`));
+  });
+
   await new Promise<void>((resolve) => {
     httpServer.listen(port, host, resolve);
   });
   console.error(
-    `iOS Simulator MCP server listening on http://${host}:${port}/mcp`
+    `iOS Simulator MCP server listening on http://${host}:${port}/mcp${
+      config.verbose ? " (verbose)" : ""
+    }`
   );
 }
 

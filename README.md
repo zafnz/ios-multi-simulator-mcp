@@ -200,6 +200,7 @@ The rotated screen is a problem when using `ui_view` due to the tapping and swip
 | `IOS_SIMULATOR_MCP_HTTP_HOST` | Bind address in HTTP mode (default: `127.0.0.1`) | `127.0.0.1` |
 | `IOS_SIMULATOR_MCP_HTTP_PORT` | Listen port in HTTP mode (default: `8008`) | `8008` |
 | `IOS_SIMULATOR_MCP_CLEANUP_ON_EXIT` | Destroy owned simulators when the server shuts down (default: `true`) | `false` |
+| `IOS_SIMULATOR_MCP_VERBOSE` | Log client connections and tool calls to stderr in HTTP mode (default: `false`) | `true` |
 
 Example with env vars:
 
@@ -250,8 +251,20 @@ CLI flags take precedence over the environment variables:
 | `--http` / `--stdio` / `--transport <mode>` | `IOS_SIMULATOR_MCP_TRANSPORT` |
 | `--host <addr>` | `IOS_SIMULATOR_MCP_HTTP_HOST` |
 | `--port <n>` | `IOS_SIMULATOR_MCP_HTTP_PORT` |
+| `--verbose` / `-v` | `IOS_SIMULATOR_MCP_VERBOSE` |
 
-(Each flag also accepts the `--flag=value` form.)
+(Each value flag also accepts the `--flag=value` form.)
+
+With `--verbose`, the server logs client connections and each call to stderr:
+
+```
+iOS Simulator MCP server listening on http://127.0.0.1:8008/mcp (verbose)
+[2026-08-09T09:53:53.472Z] client 127.0.0.1:49630 connected
+[2026-08-09T09:53:53.476Z] 127.0.0.1:49630 initialize
+[2026-08-09T09:53:53.501Z] 127.0.0.1:49632 session "qa-a" start_simulator
+[2026-08-09T09:53:54.900Z] 127.0.0.1:49632 session "qa-a" ui_tap
+[2026-08-09T09:53:55.100Z] client 127.0.0.1:49630 disconnected
+```
 
 Then point each client at it as a remote MCP server:
 
