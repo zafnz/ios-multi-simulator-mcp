@@ -71,10 +71,34 @@ function expandTilde(p: string): string {
   return p.startsWith("~/") ? path.join(os.homedir(), p.slice(2)) : p;
 }
 
+/** The package root, from the compiled build/idb/companionBinary.js. */
+function packageRoot(): string {
+  return path.join(__dirname, "..", "..");
+}
+
+/**
+ * A companion built from the vendored submodule, if there is one.
+ *
+ * This is the developer path: `cd vendor/idb && ./build.sh build` leaves its
+ * output here, and it is exactly the sha the submodule is pinned to, so it is
+ * the same binary the lock file would fetch. Absent in an installed package,
+ * which has no vendor directory.
+ */
+function locallyBuiltCompanion(): string | undefined {
+  const built = path.join(
+    packageRoot(),
+    "vendor",
+    "idb",
+    "Build",
+    "Distribution",
+    "idb_companion"
+  );
+  return isUsable(built) ? built : undefined;
+}
+
 /** Reads the lock file shipped alongside the compiled server. */
 export function readLock(): CompanionLock {
-  // build/idb/companionBinary.js -> package root
-  const lockPath = path.join(__dirname, "..", "..", "companion.lock.json");
+  const lockPath = path.join(packageRoot(), "companion.lock.json");
   if (!fs.existsSync(lockPath)) {
     throw new IdbError(
       `No companion.lock.json found at ${lockPath}, so there is no pinned ` +
@@ -133,6 +157,15 @@ async function resolveOnce(log: (message: string) => void): Promise<string> {
         `this machine is not. Intel Macs are not supported: build idb_companion ` +
         `yourself and point IOS_SIMULATOR_MCP_COMPANION_PATH at it.`
     );
+  }
+
+  // Prefer a companion built from the pinned submodule over downloading one.
+  // It is the same sha, so this is not a compatibility compromise -- it just
+  // saves a developer who has already built it from fetching it again.
+  const local = locallyBuiltCompanion();
+  if (local) {
+    log(`Using locally built idb_companion from ${path.relative(packageRoot(), local)}`);
+    return local;
   }
 
   const lock = readLock();

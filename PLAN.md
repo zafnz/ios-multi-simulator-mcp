@@ -57,6 +57,15 @@ respect up front and expensive to rediscover.
   build ever dies with no diagnostic, suspect the toolchain before the source.
 - `./build.sh` needs `protoc-gen-swift` → `brew install swift-protobuf`. Also
   `protoc` and `xcodegen`.
+- **Build with `XCODEGEN_STRIP_XATTRS=false`.** By default `build.sh` generates
+  each Xcode project into a temp dir and `sed`-rewrites absolute paths back to
+  relative ones. That rewriting mangles paths once the checkout is a couple of
+  directories deep: building at `…/ios-simulator-mcp/vendor/idb` failed with
+  *"Build input file cannot be found:
+  `/projects/…/REPL/Executor/ReplSocketServer.m`"* — the same path with the two
+  leading components eaten — while the identical sha built fine at the shallower
+  `…/idb-mcp/idb`. The env var takes the direct-generation branch and skips the
+  rewriting. This bites CI too; a runner checkout is deeper still.
 - `vendor/idb/Build/` reaches **~1.9 GB**. Gitignore it; clean it in CI.
 
 **Isolation**

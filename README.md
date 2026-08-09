@@ -118,24 +118,42 @@ You can use cheap agents like Haiku to do navigation and even visual comparison.
 ## Prerequisites
 
 - **Node.js** (v18+)
-- **macOS** (iOS simulators are macOS-only)
+- **macOS on Apple Silicon** (iOS simulators are macOS-only, and the companion
+  binary is arm64 only — Intel Macs are not supported)
 - **Xcode** with iOS simulators installed
-- **idb_companion**
 
-### idb_companion
-
-```
-brew tap facebook/fb
-brew install idb-companion
-```
-
-That is the whole dependency. There is **no Python involved** — this server
-speaks gRPC to `idb_companion` directly, so you do not need `pipx`, `fb-idb`,
-or the `idb` command line tool.
+That is the whole list. You do **not** install `idb_companion` yourself — the
+server obtains it, see [How `idb_companion` is obtained](#how-idb_companion-is-obtained).
+And there is **no Python involved** — this server speaks gRPC to the companion
+directly, so you do not need `pipx`, `fb-idb`, or the `idb` command line tool.
 
 > Upgrading from a version that asked for `fb-idb`? You can safely
 > `pipx uninstall fb-idb`. It is no longer used. See
 > [Breaking changes](#breaking-changes).
+
+### How `idb_companion` is obtained
+
+The server resolves the companion binary in this order, and uses the first one
+it finds:
+
+1. **`IOS_SIMULATOR_MCP_COMPANION_PATH`**, if set — used verbatim.
+2. **A locally built companion** at `vendor/idb/Build/Distribution/idb_companion`.
+   This is the developer path; it only exists if you have built the vendored
+   idb submodule yourself (see [CONTRIBUTING.md](CONTRIBUTING.md)).
+3. **A downloaded companion.** The URL and its sha256 are pinned in
+   `companion.lock.json`. The download is verified against that hash and cached
+   under `~/Library/Caches/ios-multi-simulator-mcp/companion/<sha256>/`, so it
+   happens once. Set `IOS_SIMULATOR_MCP_COMPANION_CACHE` to use a different
+   cache root.
+4. **Otherwise the server fails with a clear error.**
+
+Note what is *not* in that list: there is deliberately **no fallback to an
+`idb_companion` on your `PATH`** — including one installed with
+`brew install idb-companion`. An older companion does not reject request fields
+it does not understand, it silently ignores them, so falling back to whatever
+happens to be installed would produce wrong-but-plausible results instead of a
+clean failure. If you do want to use your own build, point
+`IOS_SIMULATOR_MCP_COMPANION_PATH` at it and you own the compatibility.
 
 ## Installation
 
@@ -193,7 +211,8 @@ The rotated screen is a problem when using `ui_view` due to the tapping and swip
 |----------|-------------|---------|
 | `IOS_SIMULATOR_MCP_FILTERED_TOOLS` | Comma-separated list of tool names to hide | `screenshot,record_video` |
 | `IOS_SIMULATOR_MCP_DEFAULT_OUTPUT_DIR` | Default directory for screenshots and recordings (default: `~/Downloads`) | `~/Code/project/tmp` |
-| `IOS_SIMULATOR_MCP_COMPANION_PATH` | Custom path to the `idb_companion` binary | `/opt/homebrew/bin/idb_companion` |
+| `IOS_SIMULATOR_MCP_COMPANION_PATH` | Custom path to the `idb_companion` binary, used verbatim and ahead of everything else | `~/idb/Build/Distribution/idb_companion` |
+| `IOS_SIMULATOR_MCP_COMPANION_CACHE` | Cache root for the downloaded companion (default: `~/Library/Caches/ios-multi-simulator-mcp`) | `~/.cache/imsm` |
 | `IOS_SIMULATOR_MCP_TRANSPORT` | Transport to use: `stdio` (default) or `http` | `http` |
 | `IOS_SIMULATOR_MCP_HTTP_HOST` | Bind address in HTTP mode (default: `127.0.0.1`) | `127.0.0.1` |
 | `IOS_SIMULATOR_MCP_HTTP_PORT` | Listen port in HTTP mode (default: `8008`) | `8008` |
@@ -210,7 +229,7 @@ Example with env vars:
       "args": ["-y", "ios-multi-simulator-mcp"],
       "env": {
         "IOS_SIMULATOR_MCP_DEFAULT_OUTPUT_DIR": "~/Code/project/tmp",
-        "IOS_SIMULATOR_MCP_COMPANION_PATH": "/opt/homebrew/bin/idb_companion"
+        "IOS_SIMULATOR_MCP_COMPANION_PATH": "~/idb/Build/Distribution/idb_companion"
       }
     }
   }
@@ -295,9 +314,12 @@ destroyed when the server itself shuts down unless
 The server now speaks gRPC to `idb_companion` directly instead of shelling out
 to the Python `idb` command line tool.
 
-- **`pipx install fb-idb` is no longer needed.** `brew install idb-companion`
-  is the only external dependency. Existing installs can be removed with
-  `pipx uninstall fb-idb`.
+- **`pipx install fb-idb` is no longer needed.** Existing installs can be
+  removed with `pipx uninstall fb-idb`.
+- **`brew install idb-companion` is no longer needed either.** The server
+  obtains a pinned companion itself and never falls back to one on your `PATH`,
+  so a Homebrew companion is simply ignored. See
+  [How `idb_companion` is obtained](#how-idb_companion-is-obtained).
 - **`IOS_SIMULATOR_MCP_IDB_PATH` has been removed.** It pointed at the `idb`
   CLI, which is no longer run. The server now fails at startup with an
   explanation if it is set, rather than ignoring it and leaving you to believe

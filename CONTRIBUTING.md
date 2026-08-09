@@ -28,11 +28,12 @@ If you want to make significant changes to this fork then I'd suggest talking to
 
 Before contributing, ensure you have:
 
-- **macOS** (iOS simulators only work on macOS)
+- **macOS on Apple Silicon** (iOS simulators only work on macOS, and the companion build output is arm64 only)
 - **Node.js** installed
 - **Xcode** and iOS simulators installed
-- **idb_companion** installed (`brew tap facebook/fb && brew install idb-companion`). No Python `fb-idb` needed — this server talks to the companion directly over gRPC.
 - An **MCP client** (like Cursor) for testing
+
+You do not install `idb_companion` — the server resolves it itself (env var, then a local build of the vendored submodule, then a pinned download). No Python `fb-idb` and no `brew install idb-companion`; this server talks to the companion directly over gRPC. See [How `idb_companion` is obtained](README.md#how-idb_companion-is-obtained) for the full precedence order, and [Building the companion](#building-the-companion) below if you want the developer path.
 
 For additional context and references, see [CONTEXT.md](CONTEXT.md) which contains helpful links for MCP development, iOS simulator commands, and security considerations.
 
@@ -40,10 +41,15 @@ For additional context and references, see [CONTEXT.md](CONTEXT.md) which contai
 
 1. **Fork and clone the repository**
 
+   idb is vendored as a git submodule at `vendor/idb`, pinned to a specific
+   sha, so clone recursively:
+
    ```bash
-   git clone https://github.com/your-username/ios-simulator-mcp.git
+   git clone --recurse-submodules https://github.com/your-username/ios-simulator-mcp.git
    cd ios-simulator-mcp
    ```
+
+   If you already cloned without it, run `git submodule update --init`.
 
 2. **Install dependencies**
 
@@ -66,6 +72,49 @@ For additional context and references, see [CONTEXT.md](CONTEXT.md) which contai
    # Test with MCP inspector
    npm run dev
    ```
+
+## The vendored idb submodule
+
+`vendor/idb` is [facebook/idb](https://github.com/facebook/idb) pinned to a
+specific sha. It is the source of two things: the `idb_companion` binary the
+server talks to, and the generated gRPC client and keymap under `src/idb/`.
+
+### Building the companion
+
+You do not need to build anything to run the server — it will download the
+companion pinned in `companion.lock.json`. Build locally when you are working on
+companion behaviour itself, or bumping the submodule. A build at
+`vendor/idb/Build/Distribution/idb_companion` is picked up automatically, ahead
+of the download.
+
+**Xcode 26.6 exactly** is required, pinned in `.xcode-version`. Plus:
+
+```bash
+brew install xcodegen protobuf swift-protobuf
+```
+
+Then:
+
+```bash
+cd vendor/idb && ./build.sh build
+```
+
+It takes 20–30 minutes and produces `vendor/idb/Build/Distribution/`. The output
+is **arm64 only**.
+
+The version pin is not decoration: a mismatched Swift toolchain does not give
+you a build error, it crashes the compiler with a bare stack dump and no message
+about what is wrong. If that happens, check your Xcode version first.
+
+### Regenerating the client (`npm run gen`)
+
+```bash
+npm run gen
+```
+
+This regenerates the gRPC client and the keymap from the submodule
+(`gen:proto` + `gen:keymap`). The output is checked in, so only maintainers
+bumping the submodule sha need to run it. Never hand-edit the generated files.
 
 ## Dependency Management & Upgrades
 

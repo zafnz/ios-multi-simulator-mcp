@@ -87,9 +87,16 @@ jobs:
           key: grpc-swift-${{ runner.os }}-${{ steps.pins.outputs.idb_sha }}
           restore-keys: grpc-swift-${{ runner.os }}-
 
+      # XCODEGEN_STRIP_XATTRS=false is load-bearing. The default path generates
+      # each Xcode project into a temp dir and sed-rewrites the absolute paths
+      # back to relative ones; that rewriting mangles paths when the checkout is
+      # more than a couple of directories deep, and a runner checkout
+      # (/Users/runner/work/<repo>/<repo>/vendor/idb) certainly is. The failure
+      # is a "Build input file cannot be found" naming a path with leading
+      # components missing. Direct generation skips the rewriting entirely.
       - name: Build companion
         working-directory: vendor/idb
-        run: ./build.sh build
+        run: XCODEGEN_STRIP_XATTRS=false ./build.sh build
 
       # Verify the artifact the way a user's machine will meet it: extracted to a
       # clean path, nothing else from the build tree present.
