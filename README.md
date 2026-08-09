@@ -120,26 +120,24 @@ You can use cheap agents like Haiku to do navigation and even visual comparison.
 - **Node.js** (v18+)
 - **macOS** (iOS simulators are macOS-only)
 - **Xcode** with iOS simulators installed
-- **Facebook IDB** — 
+- **idb_companion**
 
-### Facebook IDB (Important)
+### idb_companion
 
-This dependency is a little more involved. The official [install guide](https://fbidb.io/docs/installation) can be a little difficult, the easiest way to install it (imo) is to use `pipx`. 
-
-**MacOS:**
 ```
-# Install pipx to make installing python packages easier
-brew install pipx
-pipx ensurepath
-
 brew tap facebook/fb
 brew install idb-companion
-pipx install fb-idb
 ```
 
-## Installation
+That is the whole dependency. There is **no Python involved** — this server
+speaks gRPC to `idb_companion` directly, so you do not need `pipx`, `fb-idb`,
+or the `idb` command line tool.
 
-Please note the `fb-idb` dependecy above!
+> Upgrading from a version that asked for `fb-idb`? You can safely
+> `pipx uninstall fb-idb`. It is no longer used. See
+> [Breaking changes](#breaking-changes).
+
+## Installation
 
 ### Cursor
 
@@ -195,7 +193,7 @@ The rotated screen is a problem when using `ui_view` due to the tapping and swip
 |----------|-------------|---------|
 | `IOS_SIMULATOR_MCP_FILTERED_TOOLS` | Comma-separated list of tool names to hide | `screenshot,record_video` |
 | `IOS_SIMULATOR_MCP_DEFAULT_OUTPUT_DIR` | Default directory for screenshots and recordings (default: `~/Downloads`) | `~/Code/project/tmp` |
-| `IOS_SIMULATOR_MCP_IDB_PATH` | Custom path to the IDB executable | `/opt/homebrew/bin/idb` |
+| `IOS_SIMULATOR_MCP_COMPANION_PATH` | Custom path to the `idb_companion` binary | `/opt/homebrew/bin/idb_companion` |
 | `IOS_SIMULATOR_MCP_TRANSPORT` | Transport to use: `stdio` (default) or `http` | `http` |
 | `IOS_SIMULATOR_MCP_HTTP_HOST` | Bind address in HTTP mode (default: `127.0.0.1`) | `127.0.0.1` |
 | `IOS_SIMULATOR_MCP_HTTP_PORT` | Listen port in HTTP mode (default: `8008`) | `8008` |
@@ -212,7 +210,7 @@ Example with env vars:
       "args": ["-y", "ios-multi-simulator-mcp"],
       "env": {
         "IOS_SIMULATOR_MCP_DEFAULT_OUTPUT_DIR": "~/Code/project/tmp",
-        "IOS_SIMULATOR_MCP_IDB_PATH": "/opt/homebrew/bin/idb"
+        "IOS_SIMULATOR_MCP_COMPANION_PATH": "/opt/homebrew/bin/idb_companion"
       }
     }
   }
@@ -289,6 +287,28 @@ destroyed when the server itself shuts down unless
 > **Security note:** the HTTP transport is unauthenticated and binds to
 > `127.0.0.1` by default. Do not expose the port to untrusted networks — the
 > server can create and control simulators and run screen recordings.
+
+## Breaking changes
+
+### Python `fb-idb` is no longer used
+
+The server now speaks gRPC to `idb_companion` directly instead of shelling out
+to the Python `idb` command line tool.
+
+- **`pipx install fb-idb` is no longer needed.** `brew install idb-companion`
+  is the only external dependency. Existing installs can be removed with
+  `pipx uninstall fb-idb`.
+- **`IOS_SIMULATOR_MCP_IDB_PATH` has been removed.** It pointed at the `idb`
+  CLI, which is no longer run. The server now fails at startup with an
+  explanation if it is set, rather than ignoring it and leaving you to believe
+  a custom `idb` is in use. Use `IOS_SIMULATOR_MCP_COMPANION_PATH` to select a
+  specific `idb_companion` binary.
+
+Why it is worth the upgrade: every UI call used to spawn a Python process,
+which cost roughly 165ms per tap. Over a persistent connection the same tap
+takes about 1.2ms. The server also now manages `idb_companion` itself, which
+means an empty accessibility tree — previously only fixable by destroying and
+recreating the simulator — is recovered automatically.
 
 ## License
 

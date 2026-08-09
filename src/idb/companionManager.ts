@@ -28,6 +28,13 @@ const STDERR_KEEP_LINES = 20;
 const SUN_PATH_MAX = 104;
 
 /**
+ * How long a companion may sit idle before shutting itself down. Long enough
+ * not to churn during a working session, short enough that a companion orphaned
+ * by a hard kill does not live forever.
+ */
+const IDLE_SHUTDOWN_SECONDS = 3600;
+
+/**
  * Resolves the companion binary. Step 5 replaces the fallback with the
  * downloaded, hash-pinned companion; until then this is brew's.
  */
@@ -191,12 +198,12 @@ export class CompanionManager {
         udid,
         "--grpc-domain-sock",
         socketPath,
-        // A backstop against leaking companions if we die without cleaning up.
-        // Only our own build understands it; brew's 1.1.8 does not, so it is
-        // added conditionally to keep steps 1-3 working against brew.
-        ...(process.env.IOS_SIMULATOR_MCP_COMPANION_PATH
-          ? ["--idle-shutdown-time", "3600"]
-          : []),
+        // A backstop against leaking companions if we are killed without our
+        // exit hook running. Only newer companions implement it; brew's 1.1.8
+        // parses argv leniently and ignores it, so it is safe to always pass.
+        // We respawn on a dead channel, so an idle shutdown is invisible.
+        "--idle-shutdown-time",
+        String(IDLE_SHUTDOWN_SECONDS),
       ],
       { stdio: ["ignore", "pipe", "pipe"] }
     );

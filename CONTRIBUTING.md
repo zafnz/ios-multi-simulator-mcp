@@ -31,7 +31,7 @@ Before contributing, ensure you have:
 - **macOS** (iOS simulators only work on macOS)
 - **Node.js** installed
 - **Xcode** and iOS simulators installed
-- **Facebook IDB** tool installed ([installation guide](https://fbidb.io/docs/installation))
+- **idb_companion** installed (`brew tap facebook/fb && brew install idb-companion`). No Python `fb-idb` needed — this server talks to the companion directly over gRPC.
 - An **MCP client** (like Cursor) for testing
 
 For additional context and references, see [CONTEXT.md](CONTEXT.md) which contains helpful links for MCP development, iOS simulator commands, and security considerations.

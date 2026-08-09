@@ -4,64 +4,25 @@ If you encounter errors or issues using this MCP server, try the following troub
 
 ## 1. Prerequisites
 - **macOS Only:** This server only works on macOS with Xcode and iOS simulators installed.
-- **IDB Tool:** Ensure [Facebook IDB](https://fbidb.io/) is installed and available in your PATH.
+- **idb_companion:** Ensure `idb_companion` is installed and on your PATH.
 - **Node.js:** Make sure Node.js is installed and up to date.
 
-## 2. Installing IDB 
+## 2. Installing idb_companion
 
-The installation section in [IDB](https://fbidb.io/docs/installation/) is a little out of date. Since [python environments are famously borked](https://xkcd.com/1987/), here are some ways to install that are hopefully compatible with your existing python install.
+```sh
+brew tap facebook/fb
+brew install idb-companion
+```
 
-### Using Homebrew + pip
+Verify it with `idb_companion --version`.
 
-1. Install [Homebrew](https://brew.sh/) if you don't have it:
-   ```sh
-   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-   ```
-2. Install Python (if not already installed):
-   ```sh
-   brew install python
-   ```
-3. Install idb using pip:
-   ```sh
-   pip3 install --user fb-idb
-   ```
-4. Ensure your user base binary directory is in your PATH (often `~/.local/bin`):
-   ```sh
-   export PATH="$HOME/.local/bin:$PATH"
-   # Add the above line to your ~/.zshrc or ~/.bash_profile for persistence
-   ```
-5. Verify installation:
-   ```sh
-   idb -h
-   ```
+That is the only external dependency. **No Python is required.** This server
+speaks gRPC to `idb_companion` directly, so `pipx install fb-idb` and the `idb`
+command line tool are not used. If you installed `fb-idb` for an older version of
+this server, `pipx uninstall fb-idb` is safe.
 
-### Using asdf (Python version manager)
-
-1. Install [asdf](https://asdf-vm.com/):
-   ```sh
-   brew install asdf
-   ```
-2. Add the [Python plugin](https://github.com/asdf-community/asdf-python), install Python, set to global version (see asdf docs for [set](https://asdf-vm.com/manage/versions.html#set-version) and [global](https://asdf-vm.com/guide/getting-started-legacy.html#global) to do isolated installs):
-   ```sh
-   asdf plugin add python
-   asdf install python latest
-   asdf global python latest
-   asdf set python <latest-version> -u
-   asdf reshim
-   ```
-3. Install idb using pip:
-   ```sh
-   python -m pip install --user fb-idb
-   ```
-4. Ensure your user base binary directory is in your PATH (often `~/.local/bin`):
-   ```sh
-   export PATH="$HOME/.local/bin:$PATH"
-   # Add the above line to your ~/.zshrc or ~/.bash_profile for persistence
-   ```
-5. Verify installation:
-   ```sh
-   idb -h
-   ```
+If the companion lives somewhere unusual, point at it with
+`IOS_SIMULATOR_MCP_COMPANION_PATH`.
 
 ## 3. Common Issues & Fixes
 
@@ -69,9 +30,12 @@ The installation section in [IDB](https://fbidb.io/docs/installation/) is a litt
 - Open Xcode and boot an iOS simulator manually.
 - Run `xcrun simctl list devices` to verify a simulator is booted.
 
-### "idb: command not found" or IDB errors
-- Follow the install steps above for Homebrew + pip or asdf.
-- Ensure `idb` is in your PATH: try running `idb --version` in your terminal.
+### "Could not start idb_companion" / companion not found
+- Install it: `brew tap facebook/fb && brew install idb-companion`.
+- Verify it runs: `idb_companion --version`.
+- If it is installed somewhere not on your PATH, set
+  `IOS_SIMULATOR_MCP_COMPANION_PATH` to its full path.
+- Note the `idb` Python CLI is **not** used any more; you do not need it.
 
 ### Permission or File Errors
 - Ensure you have permission to write to the output path (e.g., for screenshots or recordings).
@@ -82,64 +46,65 @@ The installation section in [IDB](https://fbidb.io/docs/installation/) is a litt
 - Quit and relaunch Xcode if needed.
 - Prompt AI to check dimensions of the simulator screen and adjust coordinates to it. Screenshots have 3x resolution and this may result in incorrect position of screen presses.
 
-### Empty accessibility tree ("idb returned an empty accessibility tree, but the simulator is booted")
+### Empty accessibility tree
 
-**Symptom:** `ui_describe_all` and `ui_view` fail even though the simulator is
-clearly booted and other tools work. `ui_describe_point` still returns real
-elements. The error names this condition explicitly.
+**Symptom:** `ui_describe_all` and `ui_view` fail, or return a single empty
+element (`0x0` frame, no children), even though the simulator is clearly booted.
+`ui_describe_point` may still return real elements.
 
-**What it is:** a known accessibility failure in `idb` (Facebook's iOS Debug
-Bridge). idb's full-tree `describe-all` returns a single empty element (`0x0`
-frame, no children) while point queries keep working. The broken state is stored
-in the simulator's data container, so it **survives reboots, `idb kill`, and
-restarting SpringBoard** — only recreating the simulator (or `xcrun simctl
-erase`, which wipes it) recovers it. This is not a bug in this MCP server; it
-faithfully reports what idb returns.
+**What it is:** in most cases this is **`idb_companion` state, not simulator
+state**. A companion process that has been running for a while can wedge into
+serving an empty tree for a simulator that is perfectly healthy. This was
+verified directly: pointing a freshly spawned companion at the same simulator at
+the same moment returned the full 13-element tree while the long-running
+companion still returned `0x0`.
 
-**Important — check your idb version.** The last *packaged* idb release is
-**v1.1.8 (Aug 2022)**, which is what Homebrew and `pip install fb-idb` give you —
-but idb's source is actively developed, and its accessibility subsystem (the
-hit-test / read code behind this exact failure) was being reworked as recently as
-Aug 2026. If you are on the 2022 build (`idb_companion --version`), **building
-idb from [source](https://github.com/facebook/idb) may fix or reduce this bug.**
-Newer builds also add `idb ui --api` / `--format` flags to select alternative
-accessibility backends, which can be worth trying.
+**This server now recovers automatically.** It manages `idb_companion` itself,
+so when it sees a degenerate tree it restarts the companion and retries before
+returning anything to you. You should rarely see this error at all now.
 
-**How to recover:**
-- Call `destroy_simulator` then `start_simulator` with the same session `id`.
-  This gives a fresh simulator. **Any app you installed must be reinstalled**,
-  and any in-simulator state is lost.
-- Equivalent from the shell (keeps the same UDID): `xcrun simctl shutdown <UDID>
-  && xcrun simctl erase <UDID> && xcrun simctl boot <UDID>`.
+> Earlier versions of this guide said the broken state lived in the simulator
+> and that only recreating the simulator would clear it. That was wrong for the
+> common case — restarting the companion is enough, which is why the fix is now
+> automatic.
 
-**Before you recreate, please gather diagnostics** so the trigger can be found —
-recreating erases the evidence. Note the affected UDID first (it is in the error,
-or from `xcrun simctl list devices | grep Booted`), then collect:
+**If it still fails after that**, the automatic companion restart has already
+been tried, and the remaining possibilities are:
 
-1. **Confirm the split behaviour** (this is the fingerprint of the bug):
-   ```sh
-   U=<UDID>
-   # describe-all: expect a single 0x0 element with no children
-   idb ui describe-all --udid $U --json --nested
-   # describe-point: expect a real element with a non-zero frame
-   idb ui describe-point --udid $U --json -- 100 100
-   ```
-2. **Versions and device:**
+- The simulator has not finished booting. Wait a few seconds and retry.
+- The simulator's own accessibility server is genuinely broken. Recover by
+  calling `destroy_simulator` then `start_simulator` with the same session `id`.
+  **Any app you installed must be reinstalled.** From the shell, keeping the same
+  UDID: `xcrun simctl shutdown <UDID> && xcrun simctl erase <UDID> && xcrun simctl boot <UDID>`.
+
+**Check your companion version.** The last packaged release is **v1.1.8 (Aug
+2022)**, which is what Homebrew gives you, but idb's source is actively developed
+and its accessibility subsystem has been reworked substantially since. Check with
+`idb_companion --version`; building from [source](https://github.com/facebook/idb)
+gets you a much newer accessibility implementation.
+
+**Before you recreate a simulator, please gather diagnostics** so the trigger can
+be found — recreating erases the evidence. Note the affected UDID (from the
+error, or `xcrun simctl list devices | grep Booted`), then collect:
+
+1. **Companion version and device:**
    ```sh
    idb_companion --version
    xcrun simctl list devices | grep <UDID>   # device type + iOS runtime
-   sw_vers                                    # macOS / Xcode host
+   sw_vers                                    # macOS host
    ```
-3. **idb companion log** for that simulator — look for errors such as
-   `Unrecognised type` or `accessibilityElementsWithNestedFormat`:
+2. **Whether a fresh companion sees the tree.** This is the key question — if it
+   does, the automatic restart should have worked and we want to know why it did
+   not:
    ```sh
-   grep -iE "error|fail|unrecognised|accessibility" /tmp/idb/logs/<UDID> | tail -40
+   U=<UDID>
+   idb_companion --udid $U --grpc-domain-sock /tmp/probe.sock
+   # then, from another shell, drive it with this server or any gRPC client
    ```
-4. **The trigger — most important.** If you run the MCP server in HTTP mode with
-   `--verbose`, its stderr logs every call as `session "<id>" <tool>`. Capture
-   the sequence of calls for that session leading up to the first failure — this
-   shows what the agent did right before the tree broke. Also note **what app was
-   installed/launched** and the last few actions before it started failing.
+3. **The trigger — most important.** Run the server in HTTP mode with
+   `--verbose`: its stderr logs every call as `session "<id>" <tool>`. Capture the
+   sequence of calls leading up to the first failure, plus what app was installed
+   or launched beforehand.
 
 Include all of the above when you [open an
 issue](https://github.com/zafnz/ios-simulator-mcp/issues).

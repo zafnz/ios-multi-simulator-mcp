@@ -113,6 +113,20 @@ respect up front and expensive to rediscover.
   64 KB and presents as a mysterious hang hours in. Drain both pipes or
   redirect to a per-udid log file.
 
+**Accessibility**
+
+- **The empty-accessibility-tree bug is companion state, not simulator state.**
+  Proven during step 3: a companion that had been up for days served a
+  degenerate `0x0` tree with no children for a booted simulator, while a
+  companion spawned against *the same simulator at the same moment* returned the
+  full 13-element tree. Even `describe-point` returned `0x0` on the wedged one.
+  Restarting the companion clears it — the README, TROUBLESHOOTING and the
+  in-code diagnostic all previously said the only cure was destroying and
+  recreating the simulator (losing its installed apps), which is now the last
+  resort rather than the first. Since we own the companion, `describeAll`
+  restarts it and retries automatically. This also means **AXBRIDGE is not
+  needed to fix this bug** (§Part 6.4 wondered) — it is a different question.
+
 **Runtime**
 
 - Two MCP processes can race a cold cache. Download to a temp dir and
@@ -120,11 +134,16 @@ respect up front and expensive to rediscover.
 - The Python CLI leaks companions — there were **9 stale entries** in
   `/tmp/idb/state` on the dev machine. Spawn with `--idle-shutdown-time` *and*
   kill explicitly on `destroy_simulator`.
-- **`--idle-shutdown-time` does not exist on brew's 1.1.8** — it is a HEAD-only
-  flag (confirmed against the installed 1.1.8's `--help`). Steps 1–3 run against
-  the brew companion, so they get no idle backstop at all: explicit kill is the
-  only reaping there, and respawn-on-death is the only thing covering a
-  companion that goes away.
+- **`--idle-shutdown-time` does not exist on brew's 1.1.8**, but passing it is
+  harmless: 1.1.8 parses argv leniently and ignores unknown flags outright
+  (verified — it echoes them in its `Invoked with args=[…]` line and starts
+  normally). So pass it unconditionally rather than trying to detect support.
+  Against brew you simply get no idle backstop, which makes respawn-on-death
+  the only thing covering a companion that goes away.
+- **The readiness JSON is not the first stdout line.** 1.1.8 prints a build
+  banner, its full argv *and its entire environment* before the `grpc_path`
+  report. Parse lines until one matches — and note companion logs therefore
+  contain the environment you spawned it with.
 - **The companion will die mid-session by design.** `--idle-shutdown-time`
   means any quiet stretch kills it, so the next tool call after an idle period
   gets `UNAVAILABLE` on a dead channel — the *common* path for an agent, not an
@@ -409,7 +428,8 @@ Do these *after* parity, in this order.
 4. **`AXBRIDGE` backend as opt-in "look harder"** — 280 nodes vs 14, 43 labelled
    vs 14, at ~400 ms and 84 KB. Not a default. Good fallback when a marker
    lookup misses. Requires `Resources/SimulatorFrameworkBridge`, which our
-   distribution ships.
+   distribution ships. Note this is *not* the fix for the empty-tree bug — that
+   turned out to be companion state and is already handled (see Gotchas).
 
 Free once the channel exists, if wanted later: `approve`/`revoke` (grant camera
 /photos/location without tapping a permission dialog — removes a whole class of
