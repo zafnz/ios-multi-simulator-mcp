@@ -94,6 +94,14 @@ jobs:
       # (/Users/runner/work/<repo>/<repo>/vendor/idb) certainly is. The failure
       # is a "Build input file cannot be found" naming a path with leading
       # components missing. Direct generation skips the rewriting entirely.
+      # generate-proto is NOT implicit in `build.sh build`. IDBGRPCSwift is
+      # gitignored upstream, so a fresh checkout has no generated gRPC module
+      # and the companion fails with `no such module 'IDBGRPCSwift'`. This step
+      # clones grpc-swift and builds protoc-gen-grpc-swift (~75s).
+      - name: Generate gRPC Swift sources
+        working-directory: vendor/idb
+        run: XCODEGEN_STRIP_XATTRS=false ./build.sh generate-proto
+
       - name: Build companion
         working-directory: vendor/idb
         run: XCODEGEN_STRIP_XATTRS=false ./build.sh build

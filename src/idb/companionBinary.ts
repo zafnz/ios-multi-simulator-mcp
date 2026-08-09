@@ -289,7 +289,26 @@ function fetchToFile(url: string, destination: string): Promise<string> {
     };
 
     const get = (target: string, redirectsLeft: number) => {
-      const client = target.startsWith("http://") ? http : https;
+      // A malformed Location, or one with a protocol we cannot speak, must
+      // reject rather than throw: this runs inside a response handler, where an
+      // exception escapes the promise entirely and takes the process with it.
+      let parsed: URL;
+      try {
+        parsed = new URL(target);
+      } catch {
+        fail(new IdbError(`Not a valid URL: ${target}`));
+        return;
+      }
+      if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+        fail(
+          new IdbError(
+            `Refusing to fetch ${target}: only http and https are supported.`
+          )
+        );
+        return;
+      }
+
+      const client = parsed.protocol === "http:" ? http : https;
       const request = client.get(
         target,
         { headers: { "user-agent": "ios-multi-simulator-mcp" } },
@@ -302,7 +321,18 @@ function fetchToFile(url: string, destination: string): Promise<string> {
               fail(new IdbError(`Too many redirects fetching ${url}`));
               return;
             }
-            get(new URL(response.headers.location, target).toString(), redirectsLeft - 1);
+            let next: string;
+            try {
+              next = new URL(response.headers.location, target).toString();
+            } catch {
+              fail(
+                new IdbError(
+                  `Server redirected ${target} to an unusable location: ${response.headers.location}`
+                )
+              );
+              return;
+            }
+            get(next, redirectsLeft - 1);
             return;
           }
 

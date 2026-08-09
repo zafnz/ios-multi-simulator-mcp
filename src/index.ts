@@ -59,9 +59,14 @@ type AXElement = {
   [key: string]: unknown;
 };
 
-/** A root with a 0x0 frame carries no usable tree. */
+/**
+ * True when the read carried no usable tree: either a 0x0 root, or no document
+ * at all (the companion serializes an empty read as JSON `null`).
+ */
 function isDegenerateTree(elements: AXElement[]): boolean {
-  const frame = elements[0]?.frame;
+  const root = elements[0];
+  if (!root) return true;
+  const frame = root.frame;
   return !!frame && !frame.width && !frame.height;
 }
 
@@ -79,6 +84,9 @@ async function describeAll(udid: string): Promise<AXElement[]> {
   const read = () =>
     companions.withClient(udid, async (client) => {
       const info = await client.accessibilityInfo({ format: Format.NESTED });
+      // An empty read comes back as JSON null, which must not become [null] --
+      // that reads as a one-element tree and would be returned as a success.
+      if (info == null) return [] as AXElement[];
       return (Array.isArray(info) ? info : [info]) as AXElement[];
     });
 
@@ -89,7 +97,14 @@ async function describeAll(udid: string): Promise<AXElement[]> {
   return read();
 }
 
-/** The accessibility element at a point, in portrait coordinates. */
+/**
+ * The accessibility element at a point, in portrait coordinates.
+ *
+ * LEGACY, not NESTED, to match what `idb ui describe-point` sent: the Python
+ * client only asked for NESTED when given --nested, which describe-point never
+ * passed. Asking for NESTED here returns the element's whole subtree instead of
+ * the single element callers expect.
+ */
 async function describePoint(
   udid: string,
   x: number,
@@ -100,6 +115,7 @@ async function describePoint(
     async (client) =>
       (await client.accessibilityInfo({
         point: { x: Math.round(x), y: Math.round(y) },
+        format: Format.LEGACY,
       })) as AXElement
   );
 }

@@ -98,8 +98,14 @@ export class CompanionManager {
    *
    * A companion can go away underneath us at any time: --idle-shutdown-time is
    * meant to reap it, and an agent that pauses between calls hits that as the
-   * normal path rather than an edge case. So a dead channel is recovered by
-   * respawning and retrying once, rather than surfaced to the caller.
+   * normal path rather than an edge case. So for a read, a dead channel is
+   * recovered by respawning and retrying once rather than surfaced.
+   *
+   * Exclusive calls are NOT retried. They are the input paths, and `fn` there
+   * is not idempotent: a `hid` stream that dies after delivering half its
+   * events would, on replay, deliver those events a second time — typing
+   * "hello wohello world", or turning a two-tap into five taps. A failed write
+   * is reported so the caller can decide, rather than silently doubled.
    */
   async withClient<T>(
     udid: string,
@@ -111,6 +117,7 @@ export class CompanionManager {
       try {
         return await fn(client);
       } catch (error) {
+        if (options.exclusive) throw error;
         if (!this.isDeadChannel(udid, error)) throw error;
         await this.shutdown(udid);
         const revived = await this.clientFor(udid);
@@ -142,7 +149,12 @@ export class CompanionManager {
    */
   private isDeadChannel(udid: string, error: unknown): boolean {
     const companion = this.companions.get(udid);
-    if (companion?.exited || companion?.child.exitCode !== null) return true;
+    // Note the explicit undefined check: `companion?.child.exitCode !== null`
+    // alone is true when there is no companion at all, which would classify
+    // every ordinary error as a dead channel and respawn on it.
+    if (companion && (companion.exited || companion.child.exitCode !== null)) {
+      return true;
+    }
     const code = (error as IdbError)?.code;
     return (
       code === grpc.status.UNAVAILABLE || code === grpc.status.DEADLINE_EXCEEDED
@@ -153,13 +165,14 @@ export class CompanionManager {
   private exclusively<T>(udid: string, fn: () => Promise<T>): Promise<T> {
     const previous = this.locks.get(udid) ?? Promise.resolve();
     const next = previous.then(fn, fn);
-    // Keep the chain alive on failure, and drop it once this is the tail.
-    this.locks.set(
-      udid,
-      next.catch(() => undefined)
-    );
-    void next.catch(() => undefined).then(() => {
-      if (this.locks.get(udid) === next) this.locks.delete(udid);
+    // The chain must survive a rejection, or one failed call would poison every
+    // later one. Store the swallowed form, and compare against that same
+    // reference when dropping the tail — comparing against `next` never matches,
+    // which would retain one entry per udid forever.
+    const tail = next.catch(() => undefined);
+    this.locks.set(udid, tail);
+    void tail.then(() => {
+      if (this.locks.get(udid) === tail) this.locks.delete(udid);
     });
     return next;
   }
@@ -239,8 +252,18 @@ export class CompanionManager {
       }
     });
 
+    try {
+      await companion.client.waitForReady();
+    } catch (error) {
+      // Publishing before this point would leave a running, registered
+      // companion that never connected: clientFor would hand it out again
+      // (it has not exited), and nothing would ever kill it.
+      companion.client.close();
+      child.kill("SIGKILL");
+      throw error;
+    }
+
     this.companions.set(udid, companion);
-    await companion.client.waitForReady();
     return companion;
   }
 
@@ -321,6 +344,14 @@ export class CompanionManager {
 
   /** Stops the companion for `udid`, if we started one. */
   async shutdown(udid: string): Promise<void> {
+    // A spawn in flight has not registered yet, so shutting down without
+    // waiting for it would be a no-op that leaves an orphan moments later --
+    // and would silently skip the restart in the empty-tree recovery.
+    const inFlight = this.spawning.get(udid);
+    if (inFlight) {
+      await inFlight.catch(() => undefined);
+    }
+
     const companion = this.companions.get(udid);
     if (!companion) return;
     this.companions.delete(udid);
@@ -362,14 +393,22 @@ export class CompanionManager {
   }
 
   /**
-   * Kills our companions if the process goes down. Synchronous, because an
-   * 'exit' handler cannot await — anything asynchronous here would not run.
+   * Last-resort reaping if the process goes down without `shutdownAll`.
+   *
+   * Only the 'exit' hook, deliberately. It is tempting to also catch SIGINT and
+   * SIGTERM here, but the server installs its own async handlers for those to
+   * delete the simulators it created; a second handler calling process.exit()
+   * would run while that one was suspended at its first await and kill it
+   * mid-flight, leaking every simulator instead. 'exit' fires after those
+   * handlers complete, and covers the paths that never reach them.
+   *
+   * Synchronous, because an 'exit' handler cannot await.
    */
   private installExitHook(): void {
     if (this.exitHookInstalled) return;
     this.exitHookInstalled = true;
 
-    const killAll = () => {
+    process.on("exit", () => {
       for (const companion of this.companions.values()) {
         try {
           if (!companion.exited) companion.child.kill("SIGKILL");
@@ -378,15 +417,7 @@ export class CompanionManager {
           // Exiting anyway.
         }
       }
-    };
-
-    process.on("exit", killAll);
-    for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
-      process.on(signal, () => {
-        killAll();
-        process.exit(signal === "SIGINT" ? 130 : 143);
-      });
-    }
+    });
   }
 }
 
