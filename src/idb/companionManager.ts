@@ -290,8 +290,16 @@ export class CompanionManager {
       const fail = (reason: string) =>
         finish(() => {
           child.kill("SIGKILL");
+          // The companion can emit single lines thousands of characters long
+          // (it dumps every known target on a resolution failure). Truncate
+          // per line, or this error becomes a wall of text in the client.
           const detail = stderrTail.length
-            ? `\nLast companion output:\n  ${stderrTail.slice(-5).join("\n  ")}`
+            ? `\nLast companion output:\n  ${stderrTail
+                .slice(-5)
+                .map((line) =>
+                  line.length > 300 ? `${line.slice(0, 300)}… (truncated)` : line
+                )
+                .join("\n  ")}`
             : "";
           reject(
             new IdbError(

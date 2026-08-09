@@ -41,7 +41,8 @@ All tools take a required `id` (session identifier) parameter.
 | `attach_simulator` | `udid` | Attaches to an existing booted simulator by UDID |
 | `detect_rotation` | — | Detects device rotation and updates coordinate mapping |
 | `ui_describe_all` | — | Returns accessibility tree for the entire screen (JSON) |
-| `ui_tap` | `x`, `y`, `duration?` | Tap at coordinates |
+| `ui_find` | `label` | Finds one element by accessibility label, without fetching the screen |
+| `ui_tap` | `label?`, `x?`, `y?`, `duration?` | Tap an element by label, or at coordinates |
 | `ui_type` | `text` | Type text into the focused field |
 | `ui_swipe` | `x_start`, `y_start`, `x_end`, `y_end`, `duration?`, `delta?` | Swipe gesture |
 | `ui_describe_point` | `x`, `y` | Returns the accessibility element at a point |
@@ -89,6 +90,25 @@ All tools take a required `id` (session identifier) parameter.
 ```
 
 The `frame` coordinates map directly to `ui_tap` coordinates — to tap "General", use the centre of its frame.
+
+### When you already know what you want: `ui_find` and `ui_tap(label:)`
+
+Dumping the tree is the right move when the agent needs to *see* the screen. When
+it already knows what it is looking for, ask for that instead:
+
+```
+ui_tap  { id: "qa1", label: "Sign Up" }
+ui_find { id: "qa1", label: "Welcome back" }
+```
+
+The companion walks the tree itself and returns only the match — around 300–500
+bytes against 7–10 KB for a full screen, roughly **30x less**, in about 25 ms.
+`ui_tap` resolves the label to the centre of that element, so the model never
+handles coordinates. `ui_find` returns the element without its subtree, and
+answers "not found" as an ordinary result rather than an error, so it is safe to
+use to check whether something is on screen yet.
+
+Matching is a case-sensitive substring match against the accessibility label.
 
 ## Example usage
 

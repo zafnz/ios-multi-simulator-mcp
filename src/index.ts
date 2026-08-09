@@ -11,7 +11,7 @@ import os from "os";
 import fs from "fs";
 import http from "http";
 import { companions } from "./idb/companionManager";
-import { Format } from "./idb/client";
+import { Format, SearchableKey } from "./idb/client";
 
 const execFileAsync = promisify(execFile);
 
@@ -95,6 +95,51 @@ async function describeAll(udid: string): Promise<AXElement[]> {
 
   await companions.shutdown(udid);
   return read();
+}
+
+/**
+ * Resolves a single element by its accessibility label, server-side.
+ *
+ * The companion walks the tree and returns just the match — roughly half a
+ * kilobyte, against several for a whole tree — so "tap the thing called X"
+ * costs one small call instead of dumping the screen for the model to scan.
+ * Returns null when nothing matches, which the companion reports as an error
+ * rather than an empty result.
+ */
+async function findByLabel(
+  udid: string,
+  label: string
+): Promise<AXElement | null> {
+  return companions.withClient(udid, async (client) => {
+    try {
+      const found = (await client.accessibilityInfo({
+        marker: label,
+        matchKey: SearchableKey.LABEL,
+      })) as { elements?: AXElement } | null;
+      const element = found?.elements;
+      if (!element) return null;
+
+      // The match arrives with its whole subtree attached. On the home screen
+      // that is nothing, but a match inside an app can drag ten kilobytes of
+      // descendants along with it — which would defeat the point of asking for
+      // one element. Callers wanting structure have ui_describe_all.
+      const { children, ...withoutSubtree } = element;
+      return withoutSubtree as AXElement;
+    } catch (error) {
+      if (/found no element/i.test((error as Error).message)) return null;
+      throw error;
+    }
+  });
+}
+
+/** The centre of an element's frame, in the tree's logical coordinate space. */
+function centreOf(element: AXElement): { x: number; y: number } | null {
+  const frame = element.frame;
+  if (!frame || (!frame.width && !frame.height)) return null;
+  return {
+    x: frame.x + frame.width / 2,
+    y: frame.y + frame.height / 2,
+  };
 }
 
 /**
@@ -820,10 +865,48 @@ if (!isToolFiltered("ui_describe_all")) {
   );
 }
 
+if (!isToolFiltered("ui_find")) {
+  server.tool(
+    "ui_find",
+    "Find a single UI element by its accessibility label, without fetching the whole screen. Matches any element whose label contains the given text. Much cheaper than ui_describe_all when you already know what you are looking for.",
+    {
+      id: sessionIdSchema,
+      label: z
+        .string()
+        .min(1)
+        .max(200)
+        .describe("Label text to look for (substring match, case sensitive)"),
+    },
+    { title: "Find UI Element", readOnlyHint: true, openWorldHint: true },
+    async ({ id, label }) =>
+      handleToolError(`Error finding element labelled "${label}"`, async () => {
+        const sim = getManagedSim(id);
+        const element = await findByLabel(sim.udid, label);
+
+        if (!element) {
+          return {
+            isError: false,
+            content: [
+              {
+                type: "text",
+                text: `No element found whose label contains "${label}". Use ui_describe_all to see what is on screen.`,
+              },
+            ],
+          };
+        }
+
+        return {
+          isError: false,
+          content: [{ type: "text", text: JSON.stringify(element) }],
+        };
+      })
+  );
+}
+
 if (!isToolFiltered("ui_tap")) {
   server.tool(
     "ui_tap",
-    "Tap on the screen in the iOS Simulator",
+    "Tap on the screen in the iOS Simulator. Give either a label to tap the element with that accessibility label, or explicit x and y coordinates.",
     {
       id: sessionIdSchema,
       duration: z
@@ -831,8 +914,16 @@ if (!isToolFiltered("ui_tap")) {
         .regex(/^\d+(\.\d+)?$/)
         .optional()
         .describe("Press duration"),
-      x: z.number().describe("The x-coordinate"),
-      y: z.number().describe("The y-coordinate"),
+      label: z
+        .string()
+        .min(1)
+        .max(200)
+        .optional()
+        .describe(
+          "Accessibility label of the element to tap (substring match). Resolves to the centre of that element. Use instead of x and y."
+        ),
+      x: z.number().optional().describe("The x-coordinate (omit if using label)"),
+      y: z.number().optional().describe("The y-coordinate (omit if using label)"),
       count: z
         .number()
         .int()
@@ -843,9 +934,34 @@ if (!isToolFiltered("ui_tap")) {
         .describe("Number of taps to perform (default 1). Use 2 for double-tap."),
     },
     { title: "UI Tap", readOnlyHint: false, openWorldHint: true },
-    async ({ id, duration, x, y, count }) =>
+    async ({ id, duration, x, y, count, label }) =>
       handleToolError("Error tapping on the screen", async () => {
         const sim = getManagedSim(id);
+
+        // A label resolves to the centre of that element, in the same logical
+        // space as explicit coordinates, so both paths share the transform below.
+        if (label !== undefined) {
+          const element = await findByLabel(sim.udid, label);
+          if (!element) {
+            throw new Error(
+              `No element found whose label contains "${label}". Use ui_describe_all to see what is on screen.`
+            );
+          }
+          const centre = centreOf(element);
+          if (!centre) {
+            throw new Error(
+              `Found an element labelled "${label}", but it has no usable frame to tap.`
+            );
+          }
+          x = centre.x;
+          y = centre.y;
+        }
+
+        if (x === undefined || y === undefined) {
+          throw new Error(
+            "ui_tap needs either a label, or both x and y coordinates."
+          );
+        }
 
         // Transform logical coords to portrait space for the companion
         const dims = await getScreenDimensions(sim);
@@ -866,6 +982,10 @@ if (!isToolFiltered("ui_tap")) {
           y = pt.y;
         }
 
+        // Bound outside the closure so the narrowing above survives into it.
+        const tapX = Math.round(x);
+        const tapY = Math.round(y);
+
         // Exclusive: interleaving another session's input with a multi-tap
         // would turn a double-tap into two unrelated single taps.
         await companions.withClient(
@@ -874,8 +994,8 @@ if (!isToolFiltered("ui_tap")) {
             for (let i = 0; i < count; i++) {
               if (i > 0) await new Promise((r) => setTimeout(r, 50));
               await client.tap(
-                Math.round(x),
-                Math.round(y),
+                tapX,
+                tapY,
                 duration ? Number(duration) : undefined
               );
             }

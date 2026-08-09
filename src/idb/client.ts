@@ -57,6 +57,18 @@ function deadline(afterMs: number): Partial<grpc.CallOptions> {
   return { deadline: Date.now() + afterMs };
 }
 
+/**
+ * Descent budget for a marker query when the caller does not choose one.
+ *
+ * `depth` is how far below the root the search may go: 0 tests only the root,
+ * 1 adds its direct children. Home-screen icons are direct children, but a
+ * control inside a real app sits many levels down, so a shallow default would
+ * report perfectly visible elements as missing. The search is depth-first and
+ * stops at the first match, so a generous bound costs nothing when the element
+ * is found and merely walks the tree when it is not.
+ */
+const MARKER_DEFAULT_DEPTH = 50;
+
 export type AccessibilityQuery = {
   /** Describe the element at this point instead of the whole screen. */
   point?: { x: number; y: number };
@@ -133,11 +145,13 @@ export class IdbClient {
    * Returns the companion's parsed JSON — shape depends on `format`.
    */
   async accessibilityInfo(query: AccessibilityQuery = {}): Promise<unknown> {
-    // depth defaults to 0, and a marker query at depth 0 matches nothing: it
-    // reports the element as absent rather than erroring, which reads exactly
+    // depth defaults to 0, and a marker query at depth 0 searches only the root:
+    // it reports the element as absent rather than erroring, which reads exactly
     // like a missing control. Never let a marker query go out at depth 0.
     const depth =
-      query.marker !== undefined && !query.depth ? 1 : query.depth ?? 0;
+      query.marker !== undefined && !query.depth
+        ? MARKER_DEFAULT_DEPTH
+        : query.depth ?? 0;
 
     const request = AccessibilityInfoRequest.fromPartial({
       point: query.point,
