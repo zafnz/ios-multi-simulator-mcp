@@ -445,6 +445,64 @@ function cacheScreenDims(sim: SimSession, frame: { width: number; height: number
   }
 }
 
+/**
+ * Builds the error message for the case where `describe-all` yields a degenerate
+ * root (0x0 frame, no children).
+ *
+ * This has two very different causes:
+ *  1. The simulator is genuinely still booting.
+ *  2. A known idb/iOS incompatibility where `describe-all` returns an empty tree
+ *     on a fully-booted simulator. Its accessibility state is corrupted and
+ *     stays broken across reboots — only recreating (or `simctl erase`) the
+ *     simulator recovers it. See TROUBLESHOOTING.md ("Empty accessibility tree").
+ *
+ * We tell them apart by probing `describe-point`: on a booted-but-corrupted sim
+ * a point query still returns a real frame, whereas a still-booting sim returns
+ * nothing usable.
+ */
+async function diagnoseEmptyAccessibilityTree(udid: string): Promise<string> {
+  // idb's describe-point has a warm-up quirk: the first call after boot can
+  // return an empty 0x0 element even on a booted sim, then subsequent calls
+  // succeed. So probe a few times and treat any real frame as "booted". On a
+  // genuinely still-booting sim every probe returns nothing usable.
+  let booted = false;
+  for (let attempt = 0; attempt < 3 && !booted; attempt++) {
+    try {
+      const { stdout } = await idb(
+        "ui",
+        "describe-point",
+        "--udid",
+        udid,
+        "--json",
+        "--",
+        "100",
+        "100"
+      );
+      const el = JSON.parse(stdout);
+      if (el?.frame && (el.frame.width || el.frame.height)) {
+        booted = true;
+      }
+    } catch {
+      // Point probe failed — try again, then fall through to "still booting".
+    }
+  }
+
+  if (booted) {
+    return (
+      "idb returned an empty accessibility tree, but the simulator is booted " +
+      "(a describe-point probe still works). This is the known idb/iOS " +
+      "incompatibility where describe-all breaks and stays broken for this " +
+      "simulator until it is recreated. Recover by calling destroy_simulator " +
+      "then start_simulator (this creates a fresh simulator; any installed app " +
+      "must be reinstalled). Before recreating, please gather diagnostics as " +
+      'described in the Troubleshooting guide under "Empty accessibility tree" ' +
+      "so the trigger can be identified."
+    );
+  }
+
+  return "Simulator is still booting. Wait a few seconds and try again.";
+}
+
 // --- Server setup ---
 
 const SERVER_INSTRUCTIONS =
@@ -739,9 +797,7 @@ if (!isToolFiltered("ui_describe_all")) {
         const elements = JSON.parse(stdout);
         const screenFrame = elements[0]?.frame;
         if (screenFrame && !screenFrame.width && !screenFrame.height) {
-          throw new Error(
-            "Simulator is still booting. Wait a few seconds and try again."
-          );
+          throw new Error(await diagnoseEmptyAccessibilityTree(sim.udid));
         }
 
         // Cache screen dimensions so subsequent tap/swipe/describe_point avoid an extra IDB call
@@ -1045,9 +1101,7 @@ if (!isToolFiltered("ui_view")) {
         const pointHeight = Math.max(screenFrame.width, screenFrame.height);
 
         if (!pointWidth || !pointHeight) {
-          throw new Error(
-            "Simulator is still booting. Wait a few seconds and try again."
-          );
+          throw new Error(await diagnoseEmptyAccessibilityTree(sim.udid));
         }
 
         cacheScreenDims(sim, screenFrame);

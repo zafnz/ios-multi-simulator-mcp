@@ -82,6 +82,59 @@ The installation section in [IDB](https://fbidb.io/docs/installation/) is a litt
 - Quit and relaunch Xcode if needed.
 - Prompt AI to check dimensions of the simulator screen and adjust coordinates to it. Screenshots have 3x resolution and this may result in incorrect position of screen presses.
 
+### Empty accessibility tree ("idb returned an empty accessibility tree, but the simulator is booted")
+
+**Symptom:** `ui_describe_all` and `ui_view` fail even though the simulator is
+clearly booted and other tools work. `ui_describe_point` still returns real
+elements. The error names this condition explicitly.
+
+**What it is:** a known incompatibility between `idb` (Facebook's iOS Debug
+Bridge, unmaintained since 2022) and current iOS versions. idb's full-tree
+`describe-all` returns a single empty element (`0x0` frame, no children) while
+point queries keep working. The broken state is stored in the simulator's data
+container, so it **survives reboots, `idb kill`, and restarting SpringBoard** —
+only recreating the simulator (or `xcrun simctl erase`, which wipes it) recovers
+it. This is not a bug in this MCP server; it faithfully reports what idb returns.
+
+**How to recover:**
+- Call `destroy_simulator` then `start_simulator` with the same session `id`.
+  This gives a fresh simulator. **Any app you installed must be reinstalled**,
+  and any in-simulator state is lost.
+- Equivalent from the shell (keeps the same UDID): `xcrun simctl shutdown <UDID>
+  && xcrun simctl erase <UDID> && xcrun simctl boot <UDID>`.
+
+**Before you recreate, please gather diagnostics** so the trigger can be found —
+recreating erases the evidence. Note the affected UDID first (it is in the error,
+or from `xcrun simctl list devices | grep Booted`), then collect:
+
+1. **Confirm the split behaviour** (this is the fingerprint of the bug):
+   ```sh
+   U=<UDID>
+   # describe-all: expect a single 0x0 element with no children
+   idb ui describe-all --udid $U --json --nested
+   # describe-point: expect a real element with a non-zero frame
+   idb ui describe-point --udid $U --json -- 100 100
+   ```
+2. **Versions and device:**
+   ```sh
+   idb_companion --version
+   xcrun simctl list devices | grep <UDID>   # device type + iOS runtime
+   sw_vers                                    # macOS / Xcode host
+   ```
+3. **idb companion log** for that simulator — look for errors such as
+   `Unrecognised type` or `accessibilityElementsWithNestedFormat`:
+   ```sh
+   grep -iE "error|fail|unrecognised|accessibility" /tmp/idb/logs/<UDID> | tail -40
+   ```
+4. **The trigger — most important.** If you run the MCP server in HTTP mode with
+   `--verbose`, its stderr logs every call as `session "<id>" <tool>`. Capture
+   the sequence of calls for that session leading up to the first failure — this
+   shows what the agent did right before the tree broke. Also note **what app was
+   installed/launched** and the last few actions before it started failing.
+
+Include all of the above when you [open an
+issue](https://github.com/zafnz/ios-simulator-mcp/issues).
+
 ## 4. Still Stuck?
 - Check the [README](./README.md) for setup and usage instructions.
 - If the problem persists, [open an issue](https://github.com/joshuayoes/ios-simulator-mcp/issues) and include the error message and steps to reproduce.
