@@ -451,10 +451,12 @@ function cacheScreenDims(sim: SimSession, frame: { width: number; height: number
  *
  * This has two very different causes:
  *  1. The simulator is genuinely still booting.
- *  2. A known idb/iOS incompatibility where `describe-all` returns an empty tree
- *     on a fully-booted simulator. Its accessibility state is corrupted and
- *     stays broken across reboots — only recreating (or `simctl erase`) the
- *     simulator recovers it. See TROUBLESHOOTING.md ("Empty accessibility tree").
+ *  2. A known idb accessibility failure where `describe-all` returns an empty
+ *     tree on a fully-booted simulator. The state stays broken across reboots —
+ *     only recreating (or `simctl erase`) the simulator recovers that session.
+ *     idb's accessibility subsystem is under active development; updating idb
+ *     may prevent recurrence. See TROUBLESHOOTING.md ("Empty accessibility
+ *     tree").
  *
  * We tell them apart by probing `describe-point`: on a booted-but-corrupted sim
  * a point query still returns a real frame, whereas a still-booting sim returns
@@ -490,11 +492,11 @@ async function diagnoseEmptyAccessibilityTree(udid: string): Promise<string> {
   if (booted) {
     return (
       "idb returned an empty accessibility tree, but the simulator is booted " +
-      "(a describe-point probe still works). This is the known idb/iOS " +
-      "incompatibility where describe-all breaks and stays broken for this " +
-      "simulator until it is recreated. Recover by calling destroy_simulator " +
-      "then start_simulator (this creates a fresh simulator; any installed app " +
-      "must be reinstalled). Before recreating, please gather diagnostics as " +
+      "(a describe-point probe still works). This is a known idb accessibility " +
+      "failure that stays broken for this simulator until it is recreated. " +
+      "Recover by calling destroy_simulator then start_simulator (this creates a " +
+      "fresh simulator; any installed app must be reinstalled). Updating idb may " +
+      "prevent recurrence. Before recreating, please gather diagnostics as " +
       'described in the Troubleshooting guide under "Empty accessibility tree" ' +
       "so the trigger can be identified."
     );

@@ -88,13 +88,22 @@ The installation section in [IDB](https://fbidb.io/docs/installation/) is a litt
 clearly booted and other tools work. `ui_describe_point` still returns real
 elements. The error names this condition explicitly.
 
-**What it is:** a known incompatibility between `idb` (Facebook's iOS Debug
-Bridge, unmaintained since 2022) and current iOS versions. idb's full-tree
-`describe-all` returns a single empty element (`0x0` frame, no children) while
-point queries keep working. The broken state is stored in the simulator's data
-container, so it **survives reboots, `idb kill`, and restarting SpringBoard** —
-only recreating the simulator (or `xcrun simctl erase`, which wipes it) recovers
-it. This is not a bug in this MCP server; it faithfully reports what idb returns.
+**What it is:** a known accessibility failure in `idb` (Facebook's iOS Debug
+Bridge). idb's full-tree `describe-all` returns a single empty element (`0x0`
+frame, no children) while point queries keep working. The broken state is stored
+in the simulator's data container, so it **survives reboots, `idb kill`, and
+restarting SpringBoard** — only recreating the simulator (or `xcrun simctl
+erase`, which wipes it) recovers it. This is not a bug in this MCP server; it
+faithfully reports what idb returns.
+
+**Important — check your idb version.** The last *packaged* idb release is
+**v1.1.8 (Aug 2022)**, which is what Homebrew and `pip install fb-idb` give you —
+but idb's source is actively developed, and its accessibility subsystem (the
+hit-test / read code behind this exact failure) was being reworked as recently as
+Aug 2026. If you are on the 2022 build (`idb_companion --version`), **building
+idb from [source](https://github.com/facebook/idb) may fix or reduce this bug.**
+Newer builds also add `idb ui --api` / `--format` flags to select alternative
+accessibility backends, which can be worth trying.
 
 **How to recover:**
 - Call `destroy_simulator` then `start_simulator` with the same session `id`.
