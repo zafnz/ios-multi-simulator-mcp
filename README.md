@@ -196,6 +196,10 @@ The rotated screen is a problem when using `ui_view` due to the tapping and swip
 | `IOS_SIMULATOR_MCP_FILTERED_TOOLS` | Comma-separated list of tool names to hide | `screenshot,record_video` |
 | `IOS_SIMULATOR_MCP_DEFAULT_OUTPUT_DIR` | Default directory for screenshots and recordings (default: `~/Downloads`) | `~/Code/project/tmp` |
 | `IOS_SIMULATOR_MCP_IDB_PATH` | Custom path to the IDB executable | `/opt/homebrew/bin/idb` |
+| `IOS_SIMULATOR_MCP_TRANSPORT` | Transport to use: `stdio` (default) or `http` | `http` |
+| `IOS_SIMULATOR_MCP_HTTP_HOST` | Bind address in HTTP mode (default: `127.0.0.1`) | `127.0.0.1` |
+| `IOS_SIMULATOR_MCP_HTTP_PORT` | Listen port in HTTP mode (default: `8008`) | `8008` |
+| `IOS_SIMULATOR_MCP_CLEANUP_ON_EXIT` | Destroy owned simulators when the server shuts down (default: `true`) | `false` |
 
 Example with env vars:
 
@@ -213,6 +217,65 @@ Example with env vars:
   }
 }
 ```
+
+### HTTP transport (multi-agent)
+
+By default the server runs over **stdio**, where each MCP client spawns its own
+private server process — so simulator sessions are not shared between separate
+clients.
+
+To let multiple agents (separate Claude/Cursor instances) drive their own
+simulators against a single shared server — and to let an agent disconnect and
+later reconnect to the same simulator using the same session `id` — run one
+long-lived server in **HTTP** mode.
+
+Using CLI flags:
+
+```bash
+npx -y ios-multi-simulator-mcp --http --port 8008
+```
+
+Or the equivalent environment variables:
+
+```bash
+IOS_SIMULATOR_MCP_TRANSPORT=http \
+IOS_SIMULATOR_MCP_HTTP_PORT=8008 \
+  npx -y ios-multi-simulator-mcp
+```
+
+CLI flags take precedence over the environment variables:
+
+| Flag | Equivalent env var |
+|------|--------------------|
+| `--http` / `--stdio` / `--transport <mode>` | `IOS_SIMULATOR_MCP_TRANSPORT` |
+| `--host <addr>` | `IOS_SIMULATOR_MCP_HTTP_HOST` |
+| `--port <n>` | `IOS_SIMULATOR_MCP_HTTP_PORT` |
+
+(Each flag also accepts the `--flag=value` form.)
+
+Then point each client at it as a remote MCP server:
+
+```json
+{
+  "mcpServers": {
+    "ios-multi-simulator": {
+      "type": "http",
+      "url": "http://127.0.0.1:8008/mcp"
+    }
+  }
+}
+```
+
+Each agent picks a distinct session `id` and passes it to every tool. Because
+all state lives in the one shared server process, that simulator survives the
+agent disconnecting; calling `start_simulator` again with the same `id` resumes
+the existing simulator instead of creating a new one. Owned simulators are
+destroyed when the server itself shuts down unless
+`IOS_SIMULATOR_MCP_CLEANUP_ON_EXIT=false`.
+
+> **Security note:** the HTTP transport is unauthenticated and binds to
+> `127.0.0.1` by default. Do not expose the port to untrusted networks — the
+> server can create and control simulators and run screen recordings.
 
 ## License
 

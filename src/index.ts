@@ -2,12 +2,14 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { execFile, spawn } from "child_process";
 import { promisify } from "util";
 import { z } from "zod";
 import path from "path";
 import os from "os";
 import fs from "fs";
+import http from "http";
 
 const execFileAsync = promisify(execFile);
 
@@ -99,6 +101,32 @@ const managedSimulators = new Map<string, SimSession>();
 
 /** Tracks active recording processes by session id */
 const activeRecordings = new Map<string, import("child_process").ChildProcess>();
+
+/**
+ * Session ids that are mid-creation. Reserved synchronously in start_simulator
+ * before any `await`, so two concurrent start_simulator calls for the same new
+ * id can't both create a simulator (which would leak one).
+ */
+const startingSessions = new Set<string>();
+
+/**
+ * Looks up a simulator device by UDID via simctl. Returns its name and state
+ * ("Booted", "Shutdown", ...) or null if no such device exists.
+ */
+async function findDevice(
+  udid: string
+): Promise<{ name: string; state: string } | null> {
+  const { stdout } = await run("xcrun", ["simctl", "list", "devices", "-j"]);
+  const data = JSON.parse(stdout);
+  for (const runtime of Object.values(data.devices) as any[]) {
+    for (const device of runtime) {
+      if (device.udid === udid) {
+        return { name: device.name, state: device.state };
+      }
+    }
+  }
+  return null;
+}
 
 /** Zod schema for the session id parameter, reused across all tools */
 const sessionIdSchema = z
@@ -419,16 +447,8 @@ function cacheScreenDims(sim: SimSession, frame: { width: number; height: number
 
 // --- Server setup ---
 
-const server = new McpServer(
-  {
-    name: "ios-simulator",
-    version: PACKAGE_VERSION,
-  },
-  {
-    instructions:
-      "iOS Simulator MCP server. All coordinates are in logical screen space — what you see on screen is what you use. ui_describe_all returns element positions in logical coordinates; pass those same coordinates to ui_tap, ui_swipe, and ui_describe_point. ui_view shows screenshots rotated to match the logical orientation. Do not derive tap coordinates from ui_view screenshots, as they may not match the logical coordinate system (especially when the device is rotated). ui_view is useful for visual verification but ui_describe_all is the reliable way to navigate.",
-  }
-);
+const SERVER_INSTRUCTIONS =
+  "iOS Simulator MCP server. All coordinates are in logical screen space — what you see on screen is what you use. ui_describe_all returns element positions in logical coordinates; pass those same coordinates to ui_tap, ui_swipe, and ui_describe_point. ui_view shows screenshots rotated to match the logical orientation. Do not derive tap coordinates from ui_view screenshots, as they may not match the logical coordinate system (especially when the device is rotated). ui_view is useful for visual verification but ui_describe_all is the reliable way to navigate.";
 
 function toError(input: unknown): Error {
   if (input instanceof Error) return input;
@@ -468,6 +488,13 @@ async function handleToolError(
 
 // --- Tool registrations ---
 
+/**
+ * Registers all MCP tools on the given server instance. Called once per server
+ * instance. In HTTP mode a fresh server is created per request, but all durable
+ * state (managedSimulators, activeRecordings) lives in module-global maps that
+ * are shared across every server instance in this process.
+ */
+function registerTools(server: McpServer) {
 if (!isToolFiltered("start_simulator")) {
   server.tool(
     "start_simulator",
@@ -484,52 +511,82 @@ if (!isToolFiltered("start_simulator")) {
     { title: "Start Simulator", readOnlyHint: false, openWorldHint: true },
     async ({ id, type }) =>
       handleToolError("Error starting simulator", async () => {
+        // Reconnect/resume: if this session already has a simulator that is
+        // still booted, reuse it. This lets an agent that disconnected and came
+        // back (same id) pick up exactly where it left off.
         const existing = managedSimulators.get(id);
         if (existing) {
-          throw new Error(
-            `A simulator is already running for session "${id}": "${existing.name}" (${existing.udid}). Call destroy_simulator first.`
-          );
+          const device = await findDevice(existing.udid);
+          if (device && device.state === "Booted") {
+            // Make sure the window is visible again for the returning agent.
+            await run("open", ["-a", "Simulator.app"]);
+            return {
+              isError: false,
+              content: [
+                {
+                  type: "text",
+                  text: `Resumed existing simulator for session "${id}": "${existing.name}" (${existing.udid})`,
+                },
+              ],
+            };
+          }
+          // Stale entry — the simulator is gone or shut down. Drop it and
+          // recreate below.
+          managedSimulators.delete(id);
         }
 
-        const keyword = type || "iPhone";
-        const deviceType = await findDeviceType(keyword);
-        const runtime = await findLatestRuntime();
+        // Concurrency guard: reserve the id synchronously before any await so a
+        // second concurrent call for the same new id doesn't create a duplicate.
+        if (startingSessions.has(id)) {
+          throw new Error(
+            `A simulator is already being created for session "${id}". Wait for it to finish.`
+          );
+        }
+        startingSessions.add(id);
 
-        // Build device name: <SIM_NAME>_<id>_<type_keyword>
-        const deviceName = `${id}_${keyword.toLowerCase().replace(/\s+/g, "-")}`;
+        try {
+          const keyword = type || "iPhone";
+          const deviceType = await findDeviceType(keyword);
+          const runtime = await findLatestRuntime();
 
-        // Create the simulator
-        const { stdout: udid } = await run("xcrun", [
-          "simctl",
-          "create",
-          deviceName,
-          deviceType.identifier,
-          runtime,
-        ]);
+          // Build device name: <SIM_NAME>_<id>_<type_keyword>
+          const deviceName = `${id}_${keyword.toLowerCase().replace(/\s+/g, "-")}`;
 
-        // Boot the simulator
-        await run("xcrun", ["simctl", "boot", udid]);
+          // Create the simulator
+          const { stdout: udid } = await run("xcrun", [
+            "simctl",
+            "create",
+            deviceName,
+            deviceType.identifier,
+            runtime,
+          ]);
 
-        // Ensure Simulator.app is open
-        await run("open", ["-a", "Simulator.app"]);
+          // Boot the simulator
+          await run("xcrun", ["simctl", "boot", udid]);
 
-        managedSimulators.set(id, {
-          udid,
-          name: deviceName,
-          owned: true,
-          orientation: "auto",
-          screenDims: null,
-        });
+          // Ensure Simulator.app is open
+          await run("open", ["-a", "Simulator.app"]);
 
-        return {
-          isError: false,
-          content: [
-            {
-              type: "text",
-              text: `Simulator started: "${deviceName}" (${deviceType.name}, ${udid})`,
-            },
-          ],
-        };
+          managedSimulators.set(id, {
+            udid,
+            name: deviceName,
+            owned: true,
+            orientation: "auto",
+            screenDims: null,
+          });
+
+          return {
+            isError: false,
+            content: [
+              {
+                type: "text",
+                text: `Simulator started: "${deviceName}" (${deviceType.name}, ${udid})`,
+              },
+            ],
+          };
+        } finally {
+          startingSessions.delete(id);
+        }
       })
   );
 }
@@ -592,23 +649,7 @@ if (!isToolFiltered("attach_simulator")) {
         }
 
         // Verify the simulator exists and is booted
-        const { stdout } = await run("xcrun", [
-          "simctl",
-          "list",
-          "devices",
-          "-j",
-        ]);
-        const data = JSON.parse(stdout);
-        let found: { name: string; state: string } | null = null;
-        for (const runtime of Object.values(data.devices) as any[]) {
-          for (const device of runtime) {
-            if (device.udid === udid) {
-              found = device;
-              break;
-            }
-          }
-          if (found) break;
-        }
+        const found = await findDevice(udid);
 
         if (!found) {
           throw new Error(`No simulator found with UDID "${udid}".`);
@@ -1481,10 +1522,179 @@ if (!isToolFiltered("launch_app")) {
       })
   );
 }
+} // end registerTools
 
-async function runServer() {
+/**
+ * Builds a fully-configured McpServer instance with all tools registered.
+ * In stdio mode this is called once; in HTTP mode once per request.
+ */
+function createServer(): McpServer {
+  const server = new McpServer(
+    { name: "ios-simulator", version: PACKAGE_VERSION },
+    { instructions: SERVER_INSTRUCTIONS }
+  );
+  registerTools(server);
+  return server;
+}
+
+// --- Transports ---
+
+/**
+ * Parses CLI flags. Supported (CLI takes precedence over env vars):
+ *   --http | --stdio            select transport
+ *   --transport <stdio|http>    select transport
+ *   --host <addr>               HTTP bind address
+ *   --port <n>                  HTTP port
+ * Each flag also accepts the `--flag=value` form.
+ */
+function parseArgs(argv: string[]): {
+  transport?: string;
+  host?: string;
+  port?: string;
+} {
+  const out: { transport?: string; host?: string; port?: string } = {};
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    const eq = arg.indexOf("=");
+    const key = eq === -1 ? arg : arg.slice(0, eq);
+    // Value is either after `=` or the next argument.
+    const value = () =>
+      eq === -1 ? argv[++i] : arg.slice(eq + 1);
+
+    switch (key) {
+      case "--http":
+        out.transport = "http";
+        break;
+      case "--stdio":
+        out.transport = "stdio";
+        break;
+      case "--transport":
+        out.transport = value();
+        break;
+      case "--host":
+        out.host = value();
+        break;
+      case "--port":
+        out.port = value();
+        break;
+    }
+  }
+  return out;
+}
+
+const cliArgs = parseArgs(process.argv.slice(2));
+
+/** Resolved transport config: CLI flag > env var > default. */
+const config = {
+  transport: (
+    cliArgs.transport ||
+    process.env.IOS_SIMULATOR_MCP_TRANSPORT ||
+    "stdio"
+  ).toLowerCase(),
+  host: cliArgs.host || process.env.IOS_SIMULATOR_MCP_HTTP_HOST || "127.0.0.1",
+  port: Number(cliArgs.port || process.env.IOS_SIMULATOR_MCP_HTTP_PORT || "8008"),
+};
+
+/** Whether owned simulators are destroyed when the server process shuts down. */
+const CLEANUP_ON_EXIT =
+  (process.env.IOS_SIMULATOR_MCP_CLEANUP_ON_EXIT ?? "true").toLowerCase() !==
+  "false";
+
+async function runStdio() {
+  const server = createServer();
   const transport = new StdioServerTransport();
   await server.connect(transport);
+  // In stdio mode the client owns the process lifecycle: when stdin closes the
+  // client has gone away, so shut down (and clean up owned sims).
+  process.stdin.on("close", shutdown);
+}
+
+/**
+ * Reads the full request body and parses it as JSON. Returns undefined for an
+ * empty body (e.g. GET requests).
+ */
+function readJsonBody(req: http.IncomingMessage): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("end", () => {
+      const raw = Buffer.concat(chunks).toString("utf-8");
+      if (!raw) return resolve(undefined);
+      try {
+        resolve(JSON.parse(raw));
+      } catch (err) {
+        reject(err);
+      }
+    });
+    req.on("error", reject);
+  });
+}
+
+async function runHttp() {
+  const { host, port } = config;
+
+  const httpServer = http.createServer(async (req, res) => {
+    // Route: only POST /mcp is served. Stateless mode has no server-push (GET)
+    // or session teardown (DELETE), so those return 405.
+    const url = (req.url || "").split("?")[0];
+    if (url !== "/mcp") {
+      res.writeHead(404).end();
+      return;
+    }
+    if (req.method !== "POST") {
+      res.writeHead(405, { Allow: "POST" }).end(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          error: { code: -32000, message: "Method not allowed" },
+          id: null,
+        })
+      );
+      return;
+    }
+
+    // Stateless: a fresh server + transport per request. Durable simulator state
+    // lives in module-global maps, so it is shared across all requests and
+    // survives client disconnects/reconnects.
+    const server = createServer();
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: undefined,
+    });
+    res.on("close", () => {
+      transport.close();
+      server.close();
+    });
+
+    try {
+      const body = await readJsonBody(req);
+      await server.connect(transport);
+      await transport.handleRequest(req, res, body);
+    } catch (err) {
+      if (!res.headersSent) {
+        res.writeHead(500, { "Content-Type": "application/json" }).end(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            error: { code: -32603, message: toError(err).message },
+            id: null,
+          })
+        );
+      }
+    }
+  });
+
+  await new Promise<void>((resolve) => {
+    httpServer.listen(port, host, resolve);
+  });
+  console.error(
+    `iOS Simulator MCP server listening on http://${host}:${port}/mcp`
+  );
+}
+
+async function runServer() {
+  if (config.transport === "http") {
+    await runHttp();
+  } else {
+    await runStdio();
+  }
 }
 
 runServer().catch(console.error);
@@ -1493,12 +1703,13 @@ let cleaningUp = false;
 async function shutdown() {
   if (cleaningUp) return;
   cleaningUp = true;
-  server.close();
   // Kill any active recordings so their processes don't outlive us
   for (const proc of activeRecordings.values()) {
     try { proc.kill("SIGINT"); } catch { /* ignore */ }
   }
-  await cleanupAllSimulators();
+  if (CLEANUP_ON_EXIT) {
+    await cleanupAllSimulators();
+  }
   try {
     fs.rmSync(TMP_ROOT_DIR, { recursive: true, force: true });
   } catch {
@@ -1506,6 +1717,5 @@ async function shutdown() {
   }
 }
 
-process.stdin.on("close", shutdown);
 process.on("SIGINT", async () => { await shutdown(); process.exit(0); });
 process.on("SIGTERM", async () => { await shutdown(); process.exit(0); });
