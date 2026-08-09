@@ -38,6 +38,25 @@ const MAX_MESSAGE_BYTES = 64 * 1024 * 1024;
 /** How long to wait for the channel to come up before failing a call. */
 const CONNECT_TIMEOUT_MS = 10_000;
 
+/**
+ * Every call carries a deadline. Without one, a companion that accepts a
+ * request and never answers leaves the promise pending forever — and because
+ * input is serialized per simulator, one such call would wedge every later tap,
+ * swipe and keystroke for that simulator until the server was restarted. A
+ * deadline turns that into a recoverable error instead.
+ */
+const READ_TIMEOUT_MS = 60_000;
+
+/**
+ * Input gets longer: a swipe's duration is caller-supplied, and typing a long
+ * string is thousands of key events.
+ */
+const INPUT_TIMEOUT_MS = 120_000;
+
+function deadline(afterMs: number): Partial<grpc.CallOptions> {
+  return { deadline: Date.now() + afterMs };
+}
+
 export type AccessibilityQuery = {
   /** Describe the element at this point instead of the whole screen. */
   point?: { x: number; y: number };
@@ -98,8 +117,11 @@ export class IdbClient {
   /** Target metadata, including screen dimensions in both pixels and points. */
   async describe(): Promise<TargetDescription> {
     const response = await this.unary<TargetDescription | undefined>((cb) =>
-      this.client.describe({ fetchDiagnostics: false }, (err, res) =>
-        cb(err, res?.targetDescription)
+      this.client.describe(
+        { fetchDiagnostics: false },
+        new grpc.Metadata(),
+        deadline(READ_TIMEOUT_MS),
+        (err, res) => cb(err, res?.targetDescription)
       )
     );
     if (!response) throw new IdbError("describe returned no target description");
@@ -129,7 +151,12 @@ export class IdbClient {
     });
 
     const json = await this.unary<string>((cb) =>
-      this.client.accessibilityInfo(request, (err, res) => cb(err, res?.json))
+      this.client.accessibilityInfo(
+        request,
+        new grpc.Metadata(),
+        deadline(READ_TIMEOUT_MS),
+        (err, res) => cb(err, res?.json)
+      )
     );
 
     try {
@@ -214,7 +241,7 @@ export class IdbClient {
   /** Streams HID events and resolves once the companion acknowledges them. */
   async sendHidEvents(events: HIDEvent[]): Promise<void> {
     await new Promise<void>((resolve, reject) => {
-      const call = this.client.hid((err) =>
+      const call = this.client.hid(deadline(INPUT_TIMEOUT_MS), (err) =>
         err ? reject(this.toIdbError(err)) : resolve()
       );
       call.on("error", (err) => reject(this.toIdbError(err)));
