@@ -10,6 +10,8 @@ import path from "path";
 import os from "os";
 import fs from "fs";
 import http from "http";
+import { companions } from "./idb/companionManager";
+import { Format } from "./idb/client";
 
 const execFileAsync = promisify(execFile);
 
@@ -38,40 +40,68 @@ async function run(
   };
 }
 
+// The Python `idb` CLI is gone: we speak gRPC to idb_companion directly. This
+// variable used to point at that CLI, so it now silently does nothing — better
+// to say so than to let someone believe a custom idb is in use.
+if (process.env.IOS_SIMULATOR_MCP_IDB_PATH) {
+  throw new Error(
+    "IOS_SIMULATOR_MCP_IDB_PATH is no longer supported: this server talks to " +
+      "idb_companion directly and never runs the `idb` CLI. Unset it, or use " +
+      "IOS_SIMULATOR_MCP_COMPANION_PATH to point at a specific idb_companion binary."
+  );
+}
+
+/** An accessibility element as the companion reports it. */
+type AXElement = {
+  frame?: { x: number; y: number; width: number; height: number };
+  AXLabel?: string | null;
+  children?: AXElement[];
+  [key: string]: unknown;
+};
+
+/** A root with a 0x0 frame carries no usable tree. */
+function isDegenerateTree(elements: AXElement[]): boolean {
+  const frame = elements[0]?.frame;
+  return !!frame && !frame.width && !frame.height;
+}
+
 /**
- * Resolves the IDB command path from environment variable or defaults to "idb".
- * Validated once at startup.
+ * The accessibility tree for the whole screen, in the same nested shape the
+ * `idb` CLI used to print.
+ *
+ * A companion that has been up for a while can wedge into serving a 0x0 tree
+ * for a simulator that is perfectly healthy — a freshly spawned companion
+ * serves the same simulator correctly at the same moment. Since we own the
+ * companion, the cure is to restart it and ask again, which the caller never
+ * sees. That used to require recreating the simulator and losing its apps.
  */
-const idbPath: string = (() => {
-  const customPath = process.env.IOS_SIMULATOR_MCP_IDB_PATH;
+async function describeAll(udid: string): Promise<AXElement[]> {
+  const read = () =>
+    companions.withClient(udid, async (client) => {
+      const info = await client.accessibilityInfo({ format: Format.NESTED });
+      return (Array.isArray(info) ? info : [info]) as AXElement[];
+    });
 
-  if (customPath) {
-    // Expand tilde if present
-    const expandedPath = customPath.startsWith("~/")
-      ? path.join(os.homedir(), customPath.slice(2))
-      : customPath;
+  const elements = await read();
+  if (!isDegenerateTree(elements)) return elements;
 
-    // Check if the path exists
-    if (!fs.existsSync(expandedPath)) {
-      throw new Error(
-        `Custom IDB path specified in IOS_SIMULATOR_MCP_IDB_PATH does not exist: ${expandedPath}`
-      );
-    }
+  await companions.shutdown(udid);
+  return read();
+}
 
-    return expandedPath;
-  }
-
-  return "idb";
-})();
-
-/**
- * Runs the idb command with the given arguments
- * @param args - arguments to pass to the idb command
- * @returns The stdout and stderr of the command
- * @see https://fbidb.io/docs/commands for documentation of available idb commands
- */
-async function idb(...args: string[]) {
-  return run(idbPath, args);
+/** The accessibility element at a point, in portrait coordinates. */
+async function describePoint(
+  udid: string,
+  x: number,
+  y: number
+): Promise<AXElement> {
+  return companions.withClient(
+    udid,
+    async (client) =>
+      (await client.accessibilityInfo({
+        point: { x: Math.round(x), y: Math.round(y) },
+      })) as AXElement
+  );
 }
 
 // Read filtered tools from environment variable
@@ -288,15 +318,7 @@ function collectProbeCandidates(
  */
 async function detectOrientation(udid: string): Promise<Orientation> {
   try {
-    const { stdout } = await idb(
-      "ui",
-      "describe-all",
-      "--udid",
-      udid,
-      "--json",
-      "--nested"
-    );
-    const elements = JSON.parse(stdout);
+    const elements = await describeAll(udid);
     const rootFrame = elements[0]?.frame;
     if (!rootFrame || !rootFrame.width || !rootFrame.height) {
       return "portrait"; // still booting or degenerate frame
@@ -353,17 +375,11 @@ async function detectOrientation(udid: string): Promise<Orientation> {
       const matches: Orientation[] = [];
       for (const candidate of orientations) {
         try {
-          const { stdout: pointOutput } = await idb(
-            "ui",
-            "describe-point",
-            "--udid",
+          const pointElement = await describePoint(
             udid,
-            "--json",
-            "--",
-            String(Math.round(candidate.x)),
-            String(Math.round(candidate.y))
+            candidate.x,
+            candidate.y
           );
-          const pointElement = JSON.parse(pointOutput);
           if (pointElement.AXLabel === probe.label) {
             matches.push(candidate.orientation);
           }
@@ -388,7 +404,7 @@ async function detectOrientation(udid: string): Promise<Orientation> {
 }
 
 /**
- * Transforms a logical-space point (x, y) to portrait space for IDB input.
+ * Transforms a logical-space point (x, y) to portrait space for companion input.
  * screenW/screenH are the logical dimensions from describe_all (e.g. 1376x1032 for landscape).
  */
 function transformPointToPortrait(
@@ -421,15 +437,7 @@ async function getScreenDimensions(
 ): Promise<{ width: number; height: number } | null> {
   if (sim.screenDims) return sim.screenDims;
 
-  const { stdout } = await idb(
-    "ui",
-    "describe-all",
-    "--udid",
-    sim.udid,
-    "--json",
-    "--nested"
-  );
-  const elements = JSON.parse(stdout);
+  const elements = await describeAll(sim.udid);
   const frame = elements[0]?.frame;
   if (!frame || !frame.width || !frame.height) return null;
   sim.screenDims = { width: frame.width, height: frame.height };
@@ -446,41 +454,27 @@ function cacheScreenDims(sim: SimSession, frame: { width: number; height: number
 }
 
 /**
- * Builds the error message for the case where `describe-all` yields a degenerate
- * root (0x0 frame, no children).
+ * Builds the error message for a `describe-all` that still yields a degenerate
+ * root (0x0 frame, no children) after the companion has been restarted.
  *
- * This has two very different causes:
- *  1. The simulator is genuinely still booting.
- *  2. A known idb accessibility failure where `describe-all` returns an empty
- *     tree on a fully-booted simulator. The state stays broken across reboots —
- *     only recreating (or `simctl erase`) the simulator recovers that session.
- *     idb's accessibility subsystem is under active development; updating idb
- *     may prevent recurrence. See TROUBLESHOOTING.md ("Empty accessibility
- *     tree").
+ * The common cause is already handled before anyone reaches here: a companion
+ * that has been up a while can wedge into serving an empty tree, and
+ * `describeAll` restarts ours and retries. What is left is either a simulator
+ * that has not finished booting, or one whose accessibility server is genuinely
+ * broken.
  *
- * We tell them apart by probing `describe-point`: on a booted-but-corrupted sim
- * a point query still returns a real frame, whereas a still-booting sim returns
+ * We tell those apart by probing `describe-point`: on a booted-but-broken sim a
+ * point query still returns a real frame, whereas a still-booting sim returns
  * nothing usable.
  */
 async function diagnoseEmptyAccessibilityTree(udid: string): Promise<string> {
-  // idb's describe-point has a warm-up quirk: the first call after boot can
-  // return an empty 0x0 element even on a booted sim, then subsequent calls
-  // succeed. So probe a few times and treat any real frame as "booted". On a
-  // genuinely still-booting sim every probe returns nothing usable.
+  // describe-point has a warm-up quirk: the first call after boot can return an
+  // empty 0x0 element even on a booted sim, then subsequent calls succeed. So
+  // probe a few times and treat any real frame as "booted".
   let booted = false;
   for (let attempt = 0; attempt < 3 && !booted; attempt++) {
     try {
-      const { stdout } = await idb(
-        "ui",
-        "describe-point",
-        "--udid",
-        udid,
-        "--json",
-        "--",
-        "100",
-        "100"
-      );
-      const el = JSON.parse(stdout);
+      const el = await describePoint(udid, 100, 100);
       if (el?.frame && (el.frame.width || el.frame.height)) {
         booted = true;
       }
@@ -491,14 +485,12 @@ async function diagnoseEmptyAccessibilityTree(udid: string): Promise<string> {
 
   if (booted) {
     return (
-      "idb returned an empty accessibility tree, but the simulator is booted " +
-      "(a describe-point probe still works). This is a known idb accessibility " +
-      "failure that stays broken for this simulator until it is recreated. " +
-      "Recover by calling destroy_simulator then start_simulator (this creates a " +
-      "fresh simulator; any installed app must be reinstalled). Updating idb may " +
-      "prevent recurrence. Before recreating, please gather diagnostics as " +
-      'described in the Troubleshooting guide under "Empty accessibility tree" ' +
-      "so the trigger can be identified."
+      "The simulator is booted and answers point queries, but its accessibility " +
+      "tree is empty even after restarting idb_companion. Recover by calling " +
+      "destroy_simulator then start_simulator (this creates a fresh simulator; " +
+      "any installed app must be reinstalled). Before recreating, please gather " +
+      'diagnostics as described in the Troubleshooting guide under "Empty ' +
+      'accessibility tree" so the trigger can be identified.'
     );
   }
 
@@ -663,6 +655,10 @@ if (!isToolFiltered("destroy_simulator")) {
       handleToolError("Error destroying simulator", async () => {
         const { name, udid, owned } = getManagedSim(id);
 
+        // Stop our companion first: it holds an open connection to the
+        // simulator, and it has nothing left to talk to once this returns.
+        await companions.shutdown(udid);
+
         if (owned) {
           try { await run("xcrun", ["simctl", "shutdown", udid]); } catch { /* may already be shut down */ }
           await run("xcrun", ["simctl", "delete", udid]);
@@ -786,31 +782,23 @@ if (!isToolFiltered("ui_describe_all")) {
       handleToolError("Error describing all of the ui", async () => {
         const sim = getManagedSim(id);
 
-        const { stdout } = await idb(
-          "ui",
-          "describe-all",
-          "--udid",
-          sim.udid,
-          "--json",
-          "--nested"
-        );
-
-        // Check for still-booting (0x0 frame)
-        const elements = JSON.parse(stdout);
+        // describeAll already restarts a wedged companion and retries; a
+        // degenerate tree here means something it cannot fix.
+        const elements = await describeAll(sim.udid);
         const screenFrame = elements[0]?.frame;
-        if (screenFrame && !screenFrame.width && !screenFrame.height) {
+        if (isDegenerateTree(elements)) {
           throw new Error(await diagnoseEmptyAccessibilityTree(sim.udid));
         }
 
-        // Cache screen dimensions so subsequent tap/swipe/describe_point avoid an extra IDB call
+        // Cache screen dimensions so subsequent tap/swipe/describe_point avoid an extra call
         if (screenFrame) {
           cacheScreenDims(sim, screenFrame);
         }
 
-        // Return raw IDB output — it's already in logical screen space
+        // Already in logical screen space
         return {
           isError: false,
-          content: [{ type: "text", text: stdout }],
+          content: [{ type: "text", text: JSON.stringify(elements) }],
         };
       })
   );
@@ -843,7 +831,7 @@ if (!isToolFiltered("ui_tap")) {
       handleToolError("Error tapping on the screen", async () => {
         const sim = getManagedSim(id);
 
-        // Transform logical coords to portrait space for IDB
+        // Transform logical coords to portrait space for the companion
         const dims = await getScreenDimensions(sim);
         if (dims) {
           const orientation = getEffectiveOrientation(
@@ -862,23 +850,22 @@ if (!isToolFiltered("ui_tap")) {
           y = pt.y;
         }
 
-        const tapArgs = [
-          "ui",
-          "tap",
-          "--udid",
+        // Exclusive: interleaving another session's input with a multi-tap
+        // would turn a double-tap into two unrelated single taps.
+        await companions.withClient(
           sim.udid,
-          ...(duration ? ["--duration", duration] : []),
-          "--json",
-          "--",
-          String(Math.round(x)),
-          String(Math.round(y)),
-        ];
-
-        for (let i = 0; i < count; i++) {
-          if (i > 0) await new Promise((r) => setTimeout(r, 50));
-          const { stderr } = await idb(...tapArgs);
-          if (stderr) throw new Error(stderr);
-        }
+          async (client) => {
+            for (let i = 0; i < count; i++) {
+              if (i > 0) await new Promise((r) => setTimeout(r, 50));
+              await client.tap(
+                Math.round(x),
+                Math.round(y),
+                duration ? Number(duration) : undefined
+              );
+            }
+          },
+          { exclusive: true }
+        );
 
         return {
           isError: false,
@@ -905,19 +892,12 @@ if (!isToolFiltered("ui_type")) {
       handleToolError("Error typing text into the iOS Simulator", async () => {
         const udid = getManagedSim(id).udid;
 
-        const { stderr } = await idb(
-          "ui",
-          "text",
-          "--udid",
+        // Exclusive so another session's taps cannot land mid-string.
+        await companions.withClient(
           udid,
-          // When passing user-provided values to a command, it's crucial to use `--`
-          // to separate the command's options from positional arguments.
-          // This prevents the shell from misinterpreting the arguments as options.
-          "--",
-          text
+          (client) => client.typeText(text),
+          { exclusive: true }
         );
-
-        if (stderr) throw new Error(stderr);
 
         return {
           isError: false,
@@ -954,7 +934,7 @@ if (!isToolFiltered("ui_swipe")) {
       handleToolError("Error swiping on the screen", async () => {
         const sim = getManagedSim(id);
 
-        // Transform logical coords to portrait space for IDB
+        // Transform logical coords to portrait space for the companion
         const dims = await getScreenDimensions(sim);
         if (dims) {
           const orientation = getEffectiveOrientation(
@@ -982,25 +962,21 @@ if (!isToolFiltered("ui_swipe")) {
           y_end = ptEnd.y;
         }
 
-        const { stderr } = await idb(
-          "ui",
-          "swipe",
-          "--udid",
+        // Exclusive: a swipe is a stream of events, and another session's input
+        // landing between them scrambles the gesture.
+        await companions.withClient(
           sim.udid,
-          ...(duration ? ["--duration", duration] : []),
-          ...(delta ? ["--delta", String(delta)] : []),
-          "--json",
-          // When passing user-provided values to a command, it's crucial to use `--`
-          // to separate the command's options from positional arguments.
-          // This prevents the shell from misinterpreting the arguments as options.
-          "--",
-          String(Math.round(x_start)),
-          String(Math.round(y_start)),
-          String(Math.round(x_end)),
-          String(Math.round(y_end))
+          (client) =>
+            client.swipe(
+              { x: Math.round(x_start), y: Math.round(y_start) },
+              { x: Math.round(x_end), y: Math.round(y_end) },
+              {
+                delta: delta || undefined,
+                duration: duration ? Number(duration) : undefined,
+              }
+            ),
+          { exclusive: true }
         );
-
-        if (stderr) throw new Error(stderr);
 
         return {
           isError: false,
@@ -1024,10 +1000,10 @@ if (!isToolFiltered("ui_describe_point")) {
       handleToolError(`Error describing point (${x}, ${y})`, async () => {
         const sim = getManagedSim(id);
 
-        // Transform logical coords to portrait space for IDB
+        // Transform logical coords to portrait space for the companion
         const dims = await getScreenDimensions(sim);
-        let idbX = x;
-        let idbY = y;
+        let portraitX = x;
+        let portraitY = y;
         if (dims) {
           const orientation = getEffectiveOrientation(
             sim.orientation,
@@ -1041,30 +1017,16 @@ if (!isToolFiltered("ui_describe_point")) {
             dims.width,
             dims.height
           );
-          idbX = pt.x;
-          idbY = pt.y;
+          portraitX = pt.x;
+          portraitY = pt.y;
         }
 
-        const { stdout, stderr } = await idb(
-          "ui",
-          "describe-point",
-          "--udid",
-          sim.udid,
-          "--json",
-          // When passing user-provided values to a command, it's crucial to use `--`
-          // to separate the command's options from positional arguments.
-          // This prevents the shell from misinterpreting the arguments as options.
-          "--",
-          String(Math.round(idbX)),
-          String(Math.round(idbY))
-        );
+        const element = await describePoint(sim.udid, portraitX, portraitY);
 
-        if (stderr) throw new Error(stderr);
-
-        // Return raw IDB output — it's already in logical screen space
+        // Already in logical screen space
         return {
           isError: false,
-          content: [{ type: "text", text: stdout }],
+          content: [{ type: "text", text: JSON.stringify(element) }],
         };
       })
   );
@@ -1082,17 +1044,8 @@ if (!isToolFiltered("ui_view")) {
       handleToolError("Error capturing screenshot", async () => {
         const sim = getManagedSim(id);
 
-        // Get screen dimensions in points from ui_describe_all
-        const { stdout: uiDescribeOutput } = await idb(
-          "ui",
-          "describe-all",
-          "--udid",
-          sim.udid,
-          "--json",
-          "--nested"
-        );
-
-        const uiData = JSON.parse(uiDescribeOutput);
+        // Get screen dimensions in points from the accessibility tree
+        const uiData = await describeAll(sim.udid);
         const screenFrame = uiData[0]?.frame;
         if (!screenFrame) {
           throw new Error("Could not determine screen dimensions");
@@ -1818,6 +1771,9 @@ async function shutdown() {
   for (const proc of activeRecordings.values()) {
     try { proc.kill("SIGINT"); } catch { /* ignore */ }
   }
+  // Same for our companions. CompanionManager also installs its own exit hook,
+  // which covers the paths that never reach this function.
+  try { await companions.shutdownAll(); } catch { /* ignore */ }
   if (CLEANUP_ON_EXIT) {
     await cleanupAllSimulators();
   }
