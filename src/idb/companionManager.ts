@@ -17,6 +17,7 @@ import * as grpc from "@grpc/grpc-js";
 import fs from "fs";
 import path from "path";
 import { IdbClient, IdbError } from "./client";
+import { resolveCompanion } from "./companionBinary";
 
 /** Companions take ~0.5s to bind; a cold simulator can take considerably longer. */
 const READY_TIMEOUT_MS = 30_000;
@@ -35,20 +36,11 @@ const SUN_PATH_MAX = 104;
 const IDLE_SHUTDOWN_SECONDS = 3600;
 
 /**
- * Resolves the companion binary. Step 5 replaces the fallback with the
- * downloaded, hash-pinned companion; until then this is brew's.
+ * Where log lines about acquiring the companion go. stdout is the MCP transport
+ * in stdio mode, so this must never write there.
  */
-function companionBinary(): string {
-  const override = process.env.IOS_SIMULATOR_MCP_COMPANION_PATH;
-  if (override) {
-    if (!fs.existsSync(override)) {
-      throw new IdbError(
-        `IOS_SIMULATOR_MCP_COMPANION_PATH points at a file that does not exist: ${override}`
-      );
-    }
-    return override;
-  }
-  return "idb_companion";
+function log(message: string): void {
+  process.stderr.write(`[ios-simulator-mcp] ${message}\n`);
 }
 
 /**
@@ -190,7 +182,9 @@ export class CompanionManager {
       // Nothing there, which is the normal case.
     }
 
-    const binary = companionBinary();
+    // Lazily acquired: the download happens on the first call that actually
+    // needs a companion, not at startup.
+    const binary = await resolveCompanion(log);
     const child = spawn(
       binary,
       [
@@ -313,8 +307,9 @@ export class CompanionManager {
       child.on("error", (error) =>
         fail(
           error.message.includes("ENOENT")
-            ? `${binary} not found. Install it with \`brew install idb-companion\`, ` +
-              `or point IOS_SIMULATOR_MCP_COMPANION_PATH at a companion binary.`
+            ? `${binary} could not be executed. If it was removed from the cache, ` +
+              `deleting the cache directory forces a fresh download; otherwise ` +
+              `point IOS_SIMULATOR_MCP_COMPANION_PATH at a companion binary.`
             : error.message
         )
       );

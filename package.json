@@ -10,7 +10,8 @@
     "url": "git+https://github.com/zafnz/ios-simulator-mcp.git"
   },
   "files": [
-    "build"
+    "build",
+    "companion.lock.json"
   ],
   "scripts": {
     "prepare": "npm run build",
