@@ -15,7 +15,9 @@
   "scripts": {
     "prepare": "npm run build",
     "build": "tsc && node -e \"require('fs').chmodSync('build/index.js', '755')\"",
-    "gen:proto": "mkdir -p src/idb/generated && protoc --plugin=./node_modules/.bin/protoc-gen-ts_proto --ts_proto_out=src/idb/generated --ts_proto_opt=outputServices=grpc-js,env=node,esModuleInterop=true,useOptionals=messages,outputJsonMethods=false --proto_path=proto proto/idb.proto",
+    "gen:proto": "mkdir -p src/idb/generated && protoc --plugin=./node_modules/.bin/protoc-gen-ts_proto --ts_proto_out=src/idb/generated --ts_proto_opt=outputServices=grpc-js,env=node,esModuleInterop=true,useOptionals=messages,outputJsonMethods=false --proto_path=vendor/idb/proto vendor/idb/proto/idb.proto",
+    "gen:keymap": "node scripts/gen-keymap.mjs",
+    "gen": "npm run gen:proto && npm run gen:keymap",
     "start": "node build/index.js",
     "watch": "tsc --watch",
     "predev": "npm run build",

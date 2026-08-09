@@ -1,0 +1,3 @@
+[submodule "vendor/idb"]
+	path = vendor/idb
+	url = https://github.com/facebook/idb

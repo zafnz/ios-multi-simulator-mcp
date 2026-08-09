@@ -240,7 +240,7 @@ Per build, publish:
 
 | asset | notes |
 |---|---|
-| `companion-<idbShortSha>-arm64.tar.gz` | the 73 MB tree, gzipped |
+| `companion-<idbShortSha>-arm64.tar.gz` | the 73 MB tree, gzipped — **18 MB** in practice (measured) |
 | `companion-<idbShortSha>-arm64.tar.gz.sha256` | verified at download |
 
 Then commit `companion.lock.json` into the branch:

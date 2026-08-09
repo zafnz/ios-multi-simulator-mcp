@@ -1,0 +1,190 @@
+name: Build idb_companion
+
+# Builds the companion we ship and publishes it as a release asset.
+#
+# Deliberately NOT run on every push: a cold build is 20-30 minutes and macOS
+# runners bill at 10x minutes. It runs when the pinned idb sha moves, when the
+# toolchain pin moves, or by hand.
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish a release, rather than only building and testing"
+        type: boolean
+        default: true
+  push:
+    paths:
+      - "vendor/idb"
+      - ".xcode-version"
+      - ".github/workflows/build-companion.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Resolve pins
+        id: pins
+        run: |
+          set -euo pipefail
+          XCODE_VERSION="$(tr -d '[:space:]' < .xcode-version)"
+          IDB_SHA="$(git -C vendor/idb rev-parse HEAD)"
+          echo "xcode=$XCODE_VERSION"    >> "$GITHUB_OUTPUT"
+          echo "idb_sha=$IDB_SHA"        >> "$GITHUB_OUTPUT"
+          echo "idb_short=${IDB_SHA:0:7}" >> "$GITHUB_OUTPUT"
+          # The toolchain that this idb sha is known to build with is stamped in
+          # upstream's checked-in swiftinterface. It is the closest thing to a
+          # toolchain pin upstream publishes, and re-deriving it here means a
+          # submodule bump that needs a different Xcode fails loudly.
+          EXPECTED_SWIFT="$(sed -n 's|.*(\(swiftlang-[0-9.]*\).*|\1|p' \
+            vendor/idb/REPL/IDB/IDBAPI.swiftinterface | head -1)"
+          echo "swift=$EXPECTED_SWIFT" >> "$GITHUB_OUTPUT"
+          echo "Pinned: Xcode $XCODE_VERSION, $EXPECTED_SWIFT, idb ${IDB_SHA:0:7}"
+
+      - name: Select Xcode
+        run: |
+          set -euo pipefail
+          echo "Xcodes available on this runner:"
+          ls /Applications | grep -i '^Xcode' || true
+          APP="/Applications/Xcode_${{ steps.pins.outputs.xcode }}.app"
+          [ -d "$APP" ] || APP="/Applications/Xcode.app"
+          sudo xcode-select -s "$APP"
+          xcodebuild -version
+
+      # A toolchain mismatch does not produce an `error:` line -- it crashes
+      # swift-frontend with a bare stack dump 20 minutes in. Failing here turns
+      # that into one legible line.
+      - name: Verify toolchain matches the pin
+        run: |
+          set -euo pipefail
+          ACTUAL_XCODE="$(xcodebuild -version | head -1 | awk '{print $2}')"
+          ACTUAL_SWIFT="$(swiftc --version | sed -n 's|.*(\(swiftlang-[0-9.]*\).*|\1|p' | head -1)"
+          echo "want Xcode ${{ steps.pins.outputs.xcode }} / ${{ steps.pins.outputs.swift }}"
+          echo "got  Xcode $ACTUAL_XCODE / $ACTUAL_SWIFT"
+          if [ "$ACTUAL_SWIFT" != "${{ steps.pins.outputs.swift }}" ]; then
+            echo "::error::Swift toolchain does not match the pin derived from" \
+                 "vendor/idb/REPL/IDB/IDBAPI.swiftinterface. Building anyway risks a" \
+                 "compiler crash with no diagnostic. Update .xcode-version, or pin" \
+                 "vendor/idb to a sha that builds with $ACTUAL_SWIFT."
+            exit 1
+          fi
+
+      - name: Install build tools
+        run: brew install xcodegen protobuf swift-protobuf
+
+      - name: Cache grpc-swift plugin build
+        uses: actions/cache@v4
+        with:
+          path: vendor/idb/Build/grpc-swift
+          key: grpc-swift-${{ runner.os }}-${{ steps.pins.outputs.idb_sha }}
+          restore-keys: grpc-swift-${{ runner.os }}-
+
+      - name: Build companion
+        working-directory: vendor/idb
+        run: ./build.sh build
+
+      # Verify the artifact the way a user's machine will meet it: extracted to a
+      # clean path, nothing else from the build tree present.
+      - name: Package and smoke test
+        id: package
+        run: |
+          set -euo pipefail
+          NAME="companion-${{ steps.pins.outputs.idb_short }}-arm64.tar.gz"
+          tar czf "$RUNNER_TEMP/$NAME" -C vendor/idb/Build/Distribution .
+
+          CLEAN="$RUNNER_TEMP/verify"
+          mkdir -p "$CLEAN"
+          tar xzf "$RUNNER_TEMP/$NAME" -C "$CLEAN"
+
+          echo "Distribution contents:"
+          ls -la "$CLEAN"
+          test -x "$CLEAN/idb_companion"
+          # AXBRIDGE needs this alongside the binary; a tarball missing it builds
+          # and runs but silently loses a backend.
+          test -e "$CLEAN/Resources/SimulatorFrameworkBridge"
+
+          VERSION_JSON="$("$CLEAN/idb_companion" --version | tail -1)"
+          echo "version: $VERSION_JSON"
+          # Assert this is genuinely a fresh build, not a stale artifact.
+          echo "$VERSION_JSON" | grep -q "$(date -u '+%b %-d %Y')" || {
+            echo "::error::idb_companion --version does not report today's build date: $VERSION_JSON"
+            exit 1
+          }
+
+          SHA="$(shasum -a 256 "$RUNNER_TEMP/$NAME" | awk '{print $1}')"
+          BYTES="$(stat -f%z "$RUNNER_TEMP/$NAME")"
+          shasum -a 256 "$RUNNER_TEMP/$NAME" > "$RUNNER_TEMP/$NAME.sha256"
+          echo "name=$NAME"   >> "$GITHUB_OUTPUT"
+          echo "sha256=$SHA"  >> "$GITHUB_OUTPUT"
+          echo "bytes=$BYTES" >> "$GITHUB_OUTPUT"
+          echo "tag=companion-${{ steps.pins.outputs.idb_short }}" >> "$GITHUB_OUTPUT"
+
+      # The generated client and the published companion must come from one sha,
+      # or requests silently lose fields against an older server.
+      - name: Check the checked-in client matches this sha
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run gen
+          if ! git diff --quiet -- src/idb/generated src/idb/keymap.ts; then
+            echo "::error::src/idb/generated or src/idb/keymap.ts is stale for idb" \
+                 "${{ steps.pins.outputs.idb_short }}. Run 'npm run gen' and commit."
+            git diff --stat -- src/idb/generated src/idb/keymap.ts
+            exit 1
+          fi
+
+      - name: Write companion.lock.json
+        run: |
+          set -euo pipefail
+          cat > companion.lock.json <<JSON
+          {
+            "idbSha": "${{ steps.pins.outputs.idb_sha }}",
+            "xcode": "${{ steps.pins.outputs.xcode }}",
+            "swift": "${{ steps.pins.outputs.swift }}",
+            "arch": "arm64",
+            "url": "https://github.com/${{ github.repository }}/releases/download/${{ steps.package.outputs.tag }}/${{ steps.package.outputs.name }}",
+            "sha256": "${{ steps.package.outputs.sha256 }}",
+            "bytes": ${{ steps.package.outputs.bytes }},
+            "builtAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          }
+          JSON
+          cat companion.lock.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: companion-${{ steps.pins.outputs.idb_short }}-arm64
+          path: |
+            ${{ runner.temp }}/${{ steps.package.outputs.name }}
+            ${{ runner.temp }}/${{ steps.package.outputs.name }}.sha256
+            companion.lock.json
+
+      - name: Publish release
+        if: inputs.publish != false
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.package.outputs.tag }}
+          name: idb_companion ${{ steps.pins.outputs.idb_short }}
+          body: |
+            `idb_companion` built from facebook/idb at
+            [`${{ steps.pins.outputs.idb_short }}`](https://github.com/facebook/idb/commit/${{ steps.pins.outputs.idb_sha }}).
+
+            | | |
+            |---|---|
+            | Xcode | ${{ steps.pins.outputs.xcode }} |
+            | Swift | ${{ steps.pins.outputs.swift }} |
+            | Arch | arm64 (Apple Silicon only) |
+            | SHA-256 | `${{ steps.package.outputs.sha256 }}` |
+
+            Downloaded and verified automatically on first use. Commit the
+            `companion.lock.json` from this run to point the client at it.
+          files: |
+            ${{ runner.temp }}/${{ steps.package.outputs.name }}
+            ${{ runner.temp }}/${{ steps.package.outputs.name }}.sha256
