@@ -79,6 +79,30 @@ For additional context and references, see [CONTEXT.md](CONTEXT.md) which contai
 specific sha. It is the source of two things: the `idb_companion` binary the
 server talks to, and the generated gRPC client and keymap under `src/idb/`.
 
+### Bumping to a newer idb
+
+```bash
+cd vendor/idb && git fetch && git checkout <sha> && cd ../..
+npm run gen                       # regenerate the client and keymap
+git commit -am "build: bump idb to <sha>"
+git push
+```
+
+Pushing a moved submodule pointer is what triggers the companion build in CI.
+It builds, smoke tests the artifact, publishes a release and produces a new
+`companion.lock.json` — commit that lock file to point the server at the new
+companion.
+
+The build only runs when the idb pin or `.xcode-version` actually changes.
+Ordinary pushes, and merges that carry an unchanged submodule pointer, skip it:
+a macOS runner costs 10x minutes and a rebuild of the same commit produces a
+byte-identical artifact. Use the workflow's **force** input to build anyway.
+
+Check `vendor/idb/REPL/IDB/IDBAPI.swiftinterface` after a bump — its
+`swift-compiler-version` line is upstream's own toolchain stamp, and
+`.xcode-version` must agree with it. CI asserts this, because a mismatch does
+not produce a compiler error, it produces a crash with no diagnostic at all.
+
 ### Building the companion
 
 You do not need to build anything to run the server — it will download the
