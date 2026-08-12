@@ -52,6 +52,8 @@ First run the mcp in http mode:
 npx -y ios-multi-simulator-mcp --port 54321
 ```
 
+**Then add the mcp to your agent**
+
 **Claude Code:**
 
 ```bash
