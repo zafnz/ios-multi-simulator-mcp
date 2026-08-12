@@ -151,8 +151,13 @@ async function main() {
   } else {
     const { Client } = await import(`${REPO}/node_modules/@modelcontextprotocol/sdk/dist/esm/client/index.js`);
     const { StdioClientTransport } = await import(`${REPO}/node_modules/@modelcontextprotocol/sdk/dist/esm/client/stdio.js`);
+    // --stdio is required: the server defaults to http transport, and without
+    // it this client would wait forever for a server that is listening on a
+    // socket instead of talking over the pipe.
     const transport = new StdioClientTransport({
-      command: "node", args: [path.join(REPO, "build/index.js")], stderr: "pipe",
+      command: "node",
+      args: [path.join(REPO, "build/index.js"), "--stdio"],
+      stderr: "pipe",
     });
     const client = new Client({ name: "verify", version: "1" }, { capabilities: {} });
     await client.connect(transport);
