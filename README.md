@@ -290,10 +290,12 @@ For everything else, see [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
 ## Breaking changes
 
-### Python `fb-idb` is no longer used
+### 2.0.0 — idb is no longer a dependency
 
-The server now speaks gRPC to `idb_companion` directly instead of shelling out
-to the Python `idb` command line tool.
+The headline: **you no longer install anything from the idb project.** The
+server speaks gRPC to `idb_companion` directly instead of shelling out to the
+Python `idb` command line tool, and it obtains a pinned companion itself.
+Install went from five steps to one.
 
 - **`pipx install fb-idb` is no longer needed.** Existing installs can be
   removed with `pipx uninstall fb-idb`.
