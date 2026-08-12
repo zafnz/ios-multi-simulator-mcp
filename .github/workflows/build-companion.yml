@@ -48,6 +48,8 @@ jobs:
           fetch-depth: 0
 
       - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
@@ -62,6 +64,24 @@ jobs:
           # The pins as of this commit.
           NEW_SHA="$(git ls-tree HEAD vendor/idb | awk '{print $3}')"
           NEW_XCODE="$(tr -d '[:space:]' < .xcode-version)"
+
+          # Already published for these exact pins? Then there is nothing to
+          # build, whatever the diff says. This is the authoritative check: the
+          # release is the artifact, and the build step downstream refuses to
+          # overwrite one that exists.
+          #
+          # It is what makes merging a branch to main cheap. From main's
+          # perspective the pin genuinely did move — its previous tip still had
+          # the old sha — so the diff below says "build", the macOS runner
+          # starts, spends ~30 minutes at 10x billing, and only then hits the
+          # refuse-to-overwrite guard and fails. Asking about the release here
+          # turns that into a ten-second skip.
+          TAG="companion-${NEW_SHA:0:7}-xcode${NEW_XCODE}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "reason=$TAG is already published; these pins have an artifact" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
 
           # Compare against where the push started, not HEAD^. A push of several
           # commits that bumps the pin in any commit but the last would look
@@ -309,8 +329,56 @@ jobs:
             | Arch | arm64 (Apple Silicon only) |
             | SHA-256 | `${{ steps.package.outputs.sha256 }}` |
 
-            Downloaded and verified automatically on first use. Commit the
-            `companion.lock.json` from this run to point the client at it.
+            Downloaded and verified automatically on first use. The
+            `companion.lock.json` pointing at it is committed to the branch that
+            triggered this build.
           files: |
             ${{ runner.temp }}/${{ steps.package.outputs.name }}
             ${{ runner.temp }}/${{ steps.package.outputs.name }}.sha256
+
+      # Committed rather than left in the artifact, because a published
+      # companion that nothing points at is the failure this is trying to
+      # remove: the client keeps resolving the previous pin, and the mismatch is
+      # silent -- an older companion ignores request fields it does not
+      # understand and answers anyway.
+      #
+      # After publishing, never before: the lock names a release URL, so
+      # committing it first would leave a window where the pin resolves to
+      # nothing. If the release lands and this step fails, the artifact above
+      # still has the file and it can be committed by hand.
+      #
+      # This cannot retrigger the build -- companion.lock.json is not in the
+      # `paths` filter, and pushes made with GITHUB_TOKEN do not start workflows.
+      - name: Commit companion.lock.json to the branch
+        if: inputs.publish != false
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- companion.lock.json; then
+            echo "::notice::companion.lock.json already matches this build; nothing to commit."
+            exit 0
+          fi
+
+          BRANCH="${{ github.ref_name }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Land the file on the branch's *current* tip rather than on the sha
+          # this build started from: a 30-minute build is long enough for the
+          # branch to move, and pushing our older history would rewind it.
+          # Rebase is not an option here -- the checkout is shallow (and carries
+          # the idb submodule, so deepening it is expensive) -- but nothing is
+          # being merged: one generated file is replayed onto whatever is there.
+          cp companion.lock.json "$RUNNER_TEMP/companion.lock.json"
+          git fetch --depth=1 origin "$BRANCH"
+          git checkout -B publish-lock FETCH_HEAD
+          cp "$RUNNER_TEMP/companion.lock.json" companion.lock.json
+
+          if git diff --quiet -- companion.lock.json; then
+            echo "::notice::Branch tip already carries this companion.lock.json."
+            exit 0
+          fi
+
+          git add companion.lock.json
+          git commit -m "chore: pin companion to ${{ steps.pins.outputs.idb_short }} (Xcode ${{ steps.pins.outputs.xcode }})"
+          git push origin "HEAD:$BRANCH"
+          echo "::notice::Committed companion.lock.json to $BRANCH — git pull before continuing."

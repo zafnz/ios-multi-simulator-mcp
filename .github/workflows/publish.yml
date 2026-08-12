@@ -5,6 +5,12 @@ on:
     types: [published]
 jobs:
   build:
+    # Only package releases. This repository also publishes `companion-*`
+    # releases for the prebuilt idb_companion, which are keyed to the pinned idb
+    # sha rather than to a package version -- there are several of them per
+    # package version, and none of them is a thing to publish to npm. Without
+    # this filter, bumping the idb submodule publishes the package.
+    if: startsWith(github.event.release.tag_name, 'v')
     runs-on: ubuntu-latest
     permissions:
       contents: read
