@@ -88,7 +88,12 @@ destroyed when the server itself shuts down unless
 
 > **Security note:** the HTTP transport is unauthenticated and binds to
 > `127.0.0.1` by default. Do not expose the port to untrusted networks — the
-> server can create and control simulators and run screen recordings.
+> server can create and control simulators, read screenshots, and write files.
+>
+> Requests are checked against an allowlist of `Host` headers, which stops a web
+> page you happen to visit from pointing a hostname it controls at `127.0.0.1`
+> and driving the server from your browser. If you deliberately reach the server
+> by another name, add it to `IOS_SIMULATOR_MCP_ALLOWED_HOSTS`.
 
 **Launch an app and navigate:**
 
@@ -197,6 +202,7 @@ CLI flags take precedence over the equivalent environment variables:
 | `IOS_SIMULATOR_MCP_HTTP_PORT` | Listen port in HTTP mode (default: `8008`) | `8008` |
 | `IOS_SIMULATOR_MCP_CLEANUP_ON_EXIT` | Destroy owned simulators when the server shuts down (default: `true`) | `false` |
 | `IOS_SIMULATOR_MCP_VERBOSE` | Log client connections and tool calls to stderr in HTTP mode (default: `false`) | `true` |
+| `IOS_SIMULATOR_MCP_ALLOWED_HOSTS` | Extra `host:port` values accepted in the HTTP `Host` header. Only needed behind a proxy or when reaching the server by another name | `mac.local:8008` |
 
 In http mode these belong in the shell that starts the server, since that is the
 process they configure — the client only holds a URL:

@@ -1834,6 +1834,34 @@ function readJsonBody(req: http.IncomingMessage): Promise<unknown> {
   });
 }
 
+/**
+ * Host header values a legitimate client would send, for DNS rebinding
+ * protection.
+ *
+ * A real client connects to the address we bound and sends it verbatim in Host.
+ * A rebound request arrives naming the attacker's domain instead, so matching on
+ * this list rejects it while leaving normal use untouched.
+ *
+ * Set IOS_SIMULATOR_MCP_ALLOWED_HOSTS (comma separated, `host:port`) when
+ * fronting the server with a proxy or reaching it by another name on purpose.
+ */
+function allowedHostHeaders(host: string, port: number): string[] {
+  const names = new Set(["127.0.0.1", "localhost", "[::1]"]);
+  // A wildcard bind tells us nothing about the name clients will use, so only
+  // add an explicit address.
+  if (host && host !== "0.0.0.0" && host !== "::") names.add(host);
+
+  const allowed = [...names].map((name) => `${name}:${port}`);
+
+  const extra = process.env.IOS_SIMULATOR_MCP_ALLOWED_HOSTS;
+  if (extra) {
+    for (const entry of extra.split(",").map((s) => s.trim()).filter(Boolean)) {
+      allowed.push(entry);
+    }
+  }
+  return allowed;
+}
+
 async function runHttp() {
   const { host, port } = config;
 
@@ -1863,6 +1891,17 @@ async function runHttp() {
     const server = createServer();
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
+      // Binding to loopback is not by itself a boundary. A web page the user
+      // visits can point a hostname it controls at 127.0.0.1 (DNS rebinding);
+      // its fetch is then same-origin, so no CORS preflight applies, and it can
+      // drive every tool here — read screenshots, write files at chosen paths.
+      // The rebound request still carries the attacker's name in Host, so an
+      // allowlist of the addresses we actually serve rejects it.
+      enableDnsRebindingProtection: true,
+      allowedHosts: allowedHostHeaders(host, port),
+      // Deliberately no allowedOrigins: the SDK rejects a request that has no
+      // Origin header once that list is set, and non-browser MCP clients do not
+      // send one. Host alone is what defeats rebinding.
     });
     res.on("close", () => {
       transport.close();
