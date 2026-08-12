@@ -689,6 +689,10 @@ if (!isToolFiltered("start_simulator")) {
           // Ensure Simulator.app is open
           await run("open", ["-a", "Simulator.app"]);
 
+          // A previous destroy_simulator may have blocked this udid; a freshly
+          // created one is fair game again.
+          companions.reopen(udid);
+
           managedSimulators.set(id, {
             udid,
             name: deviceName,
@@ -725,9 +729,11 @@ if (!isToolFiltered("destroy_simulator")) {
       handleToolError("Error destroying simulator", async () => {
         const { name, udid, owned } = getManagedSim(id);
 
-        // Stop our companion first: it holds an open connection to the
-        // simulator, and it has nothing left to talk to once this returns.
-        await companions.shutdown(udid);
+        // Stop our companion and keep it stopped. simctl shutdown/delete takes
+        // seconds, and without the block a concurrent call for this simulator
+        // would see its channel die and spawn a replacement for a simulator
+        // that is about to be deleted.
+        await companions.close(udid);
 
         if (owned) {
           try { await run("xcrun", ["simctl", "shutdown", udid]); } catch { /* may already be shut down */ }
@@ -786,6 +792,10 @@ if (!isToolFiltered("attach_simulator")) {
             `Simulator "${found.name}" (${udid}) is not booted (state: ${found.state}).`
           );
         }
+
+        // Re-attaching to a udid a previous session detached from must clear
+        // any block left by that detach.
+        companions.reopen(udid);
 
         managedSimulators.set(id, {
           udid,

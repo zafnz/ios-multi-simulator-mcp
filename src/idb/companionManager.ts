@@ -67,6 +67,14 @@ function socketDir(): string {
 
 type Companion = {
   udid: string;
+  /**
+   * Identifies this particular companion instance, not just its simulator.
+   *
+   * Without it a caller recovering from a dead channel can only say "shut down
+   * the companion for this udid", which may by then be a healthy replacement
+   * someone else just started — killing it mid-call.
+   */
+  generation: number;
   child: ChildProcess;
   client: IdbClient;
   socketPath: string;
@@ -91,6 +99,14 @@ export class CompanionManager {
   private spawning = new Map<string, Promise<Companion>>();
   /** Tail of the exclusive-call chain per udid. */
   private locks = new Map<string, Promise<unknown>>();
+  /**
+   * Simulators that are being torn down. Recovery must not spawn a companion
+   * for a simulator that is about to be deleted: the spawn can win the race
+   * against `simctl delete` and leave a companion attached to nothing.
+   */
+  private closed = new Set<string>();
+  /** Monotonic, so every spawned companion is distinguishable from every other. */
+  private nextGeneration = 1;
   private exitHookInstalled = false;
 
   /**
@@ -113,48 +129,53 @@ export class CompanionManager {
     options: WithClientOptions = {}
   ): Promise<T> {
     const run = async (): Promise<T> => {
-      const client = await this.clientFor(udid);
+      const companion = await this.companionFor(udid);
       try {
-        return await fn(client);
+        return await fn(companion.client);
       } catch (error) {
         if (options.exclusive) throw error;
-        if (!this.isDeadChannel(udid, error)) throw error;
-        await this.shutdown(udid);
-        const revived = await this.clientFor(udid);
-        return await fn(revived);
+        if (!this.isDeadChannel(companion, error)) throw error;
+        // Retire only the instance that failed. Naming the udid here would let
+        // two concurrent recoveries execute each other's fresh companion, and
+        // the second retry would then fail for real.
+        await this.retire(companion);
+        const revived = await this.companionFor(udid);
+        return await fn(revived.client);
       }
     };
     return options.exclusive ? this.exclusively(udid, run) : run();
   }
 
-  /** Live client for `udid`, spawning or replacing a dead companion as needed. */
-  private async clientFor(udid: string): Promise<IdbClient> {
+  /** Live companion for `udid`, spawning or replacing a dead one as needed. */
+  private async companionFor(udid: string): Promise<Companion> {
+    if (this.closed.has(udid)) {
+      throw new IdbError(
+        `Simulator ${udid} is being shut down, so no companion will be started for it.`
+      );
+    }
+
     const existing = this.companions.get(udid);
     if (existing && !existing.exited && existing.child.exitCode === null) {
-      return existing.client;
+      return existing;
     }
-    if (existing) await this.shutdown(udid);
+    if (existing) await this.retire(existing);
 
     const inFlight = this.spawning.get(udid);
-    if (inFlight) return (await inFlight).client;
+    if (inFlight) return await inFlight;
 
     const pending = this.spawn(udid).finally(() => this.spawning.delete(udid));
     this.spawning.set(udid, pending);
-    return (await pending).client;
+    return await pending;
   }
 
   /**
    * True when the failure means the companion is gone rather than the request
    * being bad — the retry-worthy case.
    */
-  private isDeadChannel(udid: string, error: unknown): boolean {
-    const companion = this.companions.get(udid);
-    // Note the explicit undefined check: `companion?.child.exitCode !== null`
-    // alone is true when there is no companion at all, which would classify
-    // every ordinary error as a dead channel and respawn on it.
-    if (companion && (companion.exited || companion.child.exitCode !== null)) {
-      return true;
-    }
+  private isDeadChannel(companion: Companion, error: unknown): boolean {
+    // Asks about the instance the call actually used, not whatever is currently
+    // registered for the udid — which may already be a replacement.
+    if (companion.exited || companion.child.exitCode !== null) return true;
     const code = (error as IdbError)?.code;
     return (
       code === grpc.status.UNAVAILABLE || code === grpc.status.DEADLINE_EXCEEDED
@@ -180,10 +201,17 @@ export class CompanionManager {
   private async spawn(udid: string): Promise<Companion> {
     this.installExitHook();
 
+    const generation = this.nextGeneration++;
+
     const dir = socketDir();
-    // The pid keeps two of our own processes serving the same simulator from
-    // colliding on one socket.
-    const socketPath = path.join(dir, `${udid}.${process.pid}.sock`);
+    // The pid separates two of our own processes; the generation separates one
+    // spawn from the next. Without the generation every respawn reuses one
+    // path, and a companion that is still dying unlinks the socket its
+    // replacement has just bound.
+    const socketPath = path.join(
+      dir,
+      `${udid}.${process.pid}.${generation}.sock`
+    );
     if (Buffer.byteLength(socketPath) >= SUN_PATH_MAX) {
       throw new IdbError(
         `Socket path is ${Buffer.byteLength(socketPath)} bytes, over the ${SUN_PATH_MAX}-byte limit: ${socketPath}`
@@ -218,6 +246,7 @@ export class CompanionManager {
     const stderrTail: string[] = [];
     const companion: Companion = {
       udid,
+      generation,
       child,
       client: undefined as unknown as IdbClient,
       socketPath,
@@ -249,6 +278,15 @@ export class CompanionManager {
         companion.client?.close();
       } catch {
         // Closing a channel to a dead process is not interesting.
+      }
+      // A companion killed from outside never goes through retire(), so this is
+      // the only place its socket gets cleaned up. Without it the directory
+      // accumulates one dead socket per respawn. Safe because the path is
+      // unique to this instance.
+      try {
+        fs.unlinkSync(companion.socketPath);
+      } catch {
+        // Already gone, which is the normal case for a clean exit.
       }
     });
 
@@ -350,19 +388,17 @@ export class CompanionManager {
     });
   }
 
-  /** Stops the companion for `udid`, if we started one. */
-  async shutdown(udid: string): Promise<void> {
-    // A spawn in flight has not registered yet, so shutting down without
-    // waiting for it would be a no-op that leaves an orphan moments later --
-    // and would silently skip the restart in the empty-tree recovery.
-    const inFlight = this.spawning.get(udid);
-    if (inFlight) {
-      await inFlight.catch(() => undefined);
+  /**
+   * Stops one specific companion.
+   *
+   * Deregisters it only if it is still the current one for its simulator, so a
+   * late retirement cannot evict a replacement that has taken its place. Its
+   * socket path is unique to this instance, so unlinking cannot disturb one.
+   */
+  private async retire(companion: Companion): Promise<void> {
+    if (this.companions.get(companion.udid) === companion) {
+      this.companions.delete(companion.udid);
     }
-
-    const companion = this.companions.get(udid);
-    if (!companion) return;
-    this.companions.delete(udid);
 
     try {
       companion.client?.close();
@@ -389,6 +425,39 @@ export class CompanionManager {
     } catch {
       // The companion unlinks its own socket on a clean exit.
     }
+  }
+
+  /** Stops whatever companion is currently running for `udid`, if any. */
+  async shutdown(udid: string): Promise<void> {
+    // A spawn in flight has not registered yet, so shutting down without
+    // waiting for it would be a no-op that leaves an orphan moments later --
+    // and would silently skip the restart in the empty-tree recovery.
+    const inFlight = this.spawning.get(udid);
+    if (inFlight) {
+      await inFlight.catch(() => undefined);
+    }
+
+    const companion = this.companions.get(udid);
+    if (!companion) return;
+    await this.retire(companion);
+  }
+
+  /**
+   * Stops the companion and refuses to start another until `reopen`.
+   *
+   * `destroy_simulator` needs this: it shuts the companion down and then spends
+   * seconds in `simctl shutdown`/`delete`, and a concurrent call for the same
+   * simulator would otherwise see its channel die and helpfully spawn a
+   * replacement attached to a simulator that is about to stop existing.
+   */
+  async close(udid: string): Promise<void> {
+    this.closed.add(udid);
+    await this.shutdown(udid);
+  }
+
+  /** Allows companions for `udid` again, after a `close`. */
+  reopen(udid: string): void {
+    this.closed.delete(udid);
   }
 
   async shutdownAll(): Promise<void> {
