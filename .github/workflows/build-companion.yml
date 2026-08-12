@@ -43,7 +43,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          # Full history: the comparison point is where the push started, which
+          # may be many commits back.
+          fetch-depth: 0
 
       - id: check
         run: |
@@ -61,15 +63,27 @@ jobs:
           NEW_SHA="$(git ls-tree HEAD vendor/idb | awk '{print $3}')"
           NEW_XCODE="$(tr -d '[:space:]' < .xcode-version)"
 
-          # And as of its parent. A first commit, or a checkout without one,
-          # has nothing to compare against, so build.
-          if ! git rev-parse -q --verify HEAD^ >/dev/null; then
+          # Compare against where the push started, not HEAD^. A push of several
+          # commits that bumps the pin in any commit but the last would look
+          # unchanged at the tip, and the build that the bump needs would be
+          # skipped -- leaving a pinned sha with no release, and a checked-in
+          # client generated from a sha newer than the published companion.
+          BEFORE="${{ github.event.before }}"
+          if [ "${{ github.event_name }}" != "push" ] || \
+             [ -z "$BEFORE" ] || \
+             [ "$BEFORE" = "0000000000000000000000000000000000000000" ] || \
+             ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            BEFORE="$(git rev-parse -q --verify HEAD^ || true)"
+          fi
+
+          if [ -z "$BEFORE" ]; then
             echo "build=true" >> "$GITHUB_OUTPUT"
-            echo "reason=no parent commit to compare against" >> "$GITHUB_OUTPUT"
+            echo "reason=nothing to compare against" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          OLD_SHA="$(git ls-tree HEAD^ vendor/idb | awk '{print $3}' || true)"
-          OLD_XCODE="$(git show HEAD^:.xcode-version 2>/dev/null | tr -d '[:space:]' || true)"
+          echo "comparing against $BEFORE"
+          OLD_SHA="$(git ls-tree "$BEFORE" vendor/idb | awk '{print $3}' || true)"
+          OLD_XCODE="$(git show "$BEFORE:.xcode-version" 2>/dev/null | tr -d '[:space:]' || true)"
 
           echo "idb:   ${OLD_SHA:-none} -> ${NEW_SHA:-none}"
           echo "xcode: ${OLD_XCODE:-none} -> ${NEW_XCODE:-none}"
@@ -185,7 +199,10 @@ jobs:
         id: package
         run: |
           set -euo pipefail
-          NAME="companion-${{ steps.pins.outputs.idb_short }}-arm64.tar.gz"
+          # Keyed on BOTH pins. A toolchain-only rebuild is a different
+          # artifact with a different hash, so it must not land on the URL an
+          # already-published companion.lock.json points at.
+          NAME="companion-${{ steps.pins.outputs.idb_short }}-xcode${{ steps.pins.outputs.xcode }}-arm64.tar.gz"
           tar czf "$RUNNER_TEMP/$NAME" -C vendor/idb/Build/Distribution .
 
           CLEAN="$RUNNER_TEMP/verify"
@@ -213,7 +230,7 @@ jobs:
           echo "name=$NAME"   >> "$GITHUB_OUTPUT"
           echo "sha256=$SHA"  >> "$GITHUB_OUTPUT"
           echo "bytes=$BYTES" >> "$GITHUB_OUTPUT"
-          echo "tag=companion-${{ steps.pins.outputs.idb_short }}" >> "$GITHUB_OUTPUT"
+          echo "tag=companion-${{ steps.pins.outputs.idb_short }}-xcode${{ steps.pins.outputs.xcode }}" >> "$GITHUB_OUTPUT"
 
       # The generated client and the published companion must come from one sha,
       # or requests silently lose fields against an older server.
@@ -253,6 +270,27 @@ jobs:
             ${{ runner.temp }}/${{ steps.package.outputs.name }}
             ${{ runner.temp }}/${{ steps.package.outputs.name }}.sha256
             companion.lock.json
+
+      # Never replace an asset a lock file may already pin. Even rebuilding the
+      # identical pins produces a different artifact, because the companion
+      # embeds its build timestamp -- so republishing over a tag would break the
+      # checksum for every install of every version that pinned it. Delete the
+      # release by hand if you genuinely mean to replace it.
+      - name: Refuse to overwrite an existing release
+        if: inputs.publish != false
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.package.outputs.tag }}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::error::Release $TAG already exists. Publishing would replace" \
+                 "its asset with a different checksum and break every" \
+                 "companion.lock.json pinning it. Delete the release first if" \
+                 "that is really what you want."
+            exit 1
+          fi
+          echo "$TAG does not exist yet — safe to publish."
 
       - name: Publish release
         if: inputs.publish != false
