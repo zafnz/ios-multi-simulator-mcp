@@ -11,7 +11,7 @@ import os from "os";
 import fs from "fs";
 import http from "http";
 import { companions } from "./idb/companionManager";
-import { Format, SearchableKey } from "./idb/client";
+import { Backend, Format, SearchableKey } from "./idb/client";
 
 const execFileAsync = promisify(execFile);
 
@@ -98,6 +98,160 @@ async function describeAll(udid: string): Promise<AXElement[]> {
 }
 
 /**
+ * The keys a rich screen read asks for.
+ *
+ * Deliberately not the companion's default set, which is both wider and
+ * narrower than callers need. `frame` is the dictionary form and is what this
+ * server computes with everywhere; `AXFrame` is the same rectangle rendered as
+ * a string, so asking for both would pay twice for one fact. `AXValue` earns
+ * its place because a control's visible text is not always its label — search
+ * fields in particular come back with a null `AXLabel` and their text in
+ * `AXValue`, and would be unidentifiable without it.
+ *
+ * Left out: `pid`, `help`, `title`, `subrole`, `content_required`,
+ * `custom_actions`, `role_description` and `traits`. They are near-constant or
+ * near-null across a screen, and this payload is read by a model on every call.
+ */
+const DESCRIBE_KEYS = [
+  "AXLabel",
+  "frame",
+  "AXValue",
+  "AXUniqueId",
+  "type",
+  "enabled",
+];
+
+/** Roles that are worth reporting even with no label or identifier. */
+const ACTIONABLE_TYPES = new Set([
+  "Button",
+  "Cell",
+  "CheckBox",
+  "ComboBox",
+  "Link",
+  "PopUpButton",
+  "RadioButton",
+  "ScrollBar",
+  "SearchField",
+  "SecureTextField",
+  "Slider",
+  "Stepper",
+  "Switch",
+  "TabButton",
+  "TextArea",
+  "TextField",
+]);
+
+/**
+ * Types that mean nothing on their own — the boxes a layout is built out of.
+ * A named one is still worth keeping; it is an anonymous one that is noise.
+ */
+const CONTAINER_TYPES = new Set(["Any", "Group", "Other", "Unknown"]);
+
+/** An element a caller could plausibly act on or reason about. */
+function isInteresting(element: AXElement): boolean {
+  const label = element.AXLabel;
+  if (typeof label === "string" && label.trim()) return true;
+  const value = element.AXValue;
+  if (typeof value === "string" && value.trim()) return true;
+
+  const type = String(element.type);
+  if (ACTIONABLE_TYPES.has(type)) return true;
+
+  // An identifier alone does not make an element worth reporting: UIKit gives
+  // its internal layout groups identifiers too, and on a photo grid that is a
+  // five-deep chain of anonymous `PX*-Group` nodes between the scroll view and
+  // the images. Keep an identified element only where its type says it is a
+  // real thing rather than a box.
+  const id = element.AXUniqueId;
+  return typeof id === "string" && !!id && !CONTAINER_TYPES.has(type);
+}
+
+/**
+ * Drops the structural scaffolding from a tree, keeping what a caller can act
+ * on. A dropped node's kept descendants are hoisted to its nearest kept
+ * ancestor, so pruning never orphans a control — it only shortens the path to
+ * it.
+ *
+ * This exists because the filter belongs on the companion and is not reachable
+ * from here: idb has exactly this rule as
+ * `FBAccessibilityElementFilter.interactable`, but the gRPC surface never sets
+ * it, so every read arrives unfiltered. Doing it client-side costs a tree walk
+ * we have already paid to receive, and saves the model reading the half of the
+ * tree that is anonymous group containers.
+ *
+ * Null and empty-string fields are dropped for the same reason: a screen's
+ * worth of `"AXValue": null` is pure noise.
+ */
+function pruneTree(elements: AXElement[]): AXElement[] {
+  const visit = (element: AXElement): AXElement[] => {
+    const kept = (element.children ?? []).flatMap(visit);
+
+    if (!isInteresting(element)) return kept;
+
+    const out: AXElement = {};
+    for (const [key, value] of Object.entries(element)) {
+      if (key === "children") continue;
+      if (value === null || value === undefined || value === "") continue;
+      out[key] = value;
+    }
+    if (kept.length) out.children = kept;
+    return [out];
+  };
+
+  // The root is the screen itself and carries the frame callers measure
+  // against, so it is kept whether or not it is interesting in its own right.
+  return elements.flatMap((root) => {
+    const children = (root.children ?? []).flatMap(visit);
+    const out: AXElement = {};
+    for (const [key, value] of Object.entries(root)) {
+      if (key === "children") continue;
+      if (value === null || value === undefined || value === "") continue;
+      out[key] = value;
+    }
+    if (children.length) out.children = children;
+    return [out];
+  });
+}
+
+/**
+ * The screen as a caller should see it: the complete tree, pruned.
+ *
+ * Separate from `describeAll` because the two want opposite things. Callers
+ * that only need the root frame — orientation, screen dimensions, ui_view —
+ * are served by the cheap read in ~13ms, and making them pay for this one
+ * would be a sixfold regression for a rectangle they already had.
+ *
+ * AXBridge, because the default backend does not return a usable screen: tab
+ * bars, nav bars and toolbars arrive as containers with no children, so their
+ * controls are absent from the tree entirely even though they are on screen
+ * and tappable. That is worth ~300ms and a larger payload, because the cheaper
+ * answer is wrong in a way a caller cannot detect.
+ */
+async function describeScreen(udid: string): Promise<AXElement[]> {
+  const elements = await companions.withClient(udid, async (client) => {
+    const read = async (backend?: Backend, keys?: string[]) => {
+      const info = await client.accessibilityInfo({
+        format: Format.NESTED,
+        backend,
+        keys,
+      });
+      if (info == null) return [] as AXElement[];
+      return (Array.isArray(info) ? info : [info]) as AXElement[];
+    };
+
+    try {
+      return await read(Backend.AXBRIDGE, DESCRIBE_KEYS);
+    } catch {
+      // A companion older than the one this server pins cannot start AXBridge.
+      // An incomplete tree beats no tree, so fall back rather than fail.
+      return await read();
+    }
+  });
+
+  return pruneTree(elements);
+}
+
+/**
  * Resolves a single element by its accessibility label, server-side.
  *
  * The companion walks the tree and returns just the match — roughly half a
@@ -105,16 +259,29 @@ async function describeAll(udid: string): Promise<AXElement[]> {
  * costs one small call instead of dumping the screen for the model to scan.
  * Returns null when nothing matches, which the companion reports as an error
  * rather than an empty result.
+ *
+ * Two backends, cheap one first. The default backend walks the tree Apple's
+ * translator exposes, and that tree is missing whole subtrees: a tab bar, nav
+ * bar or toolbar comes back as a container with no children, so every control
+ * inside one is unfindable even though it carries the label being searched for
+ * and hit-tests fine. AXBridge walks the app's real view hierarchy instead and
+ * does find them.
+ *
+ * AXBridge is not the default because it is ~20x slower — 15ms against 300ms
+ * on a warm read — which is not worth paying on the lookups that already work.
+ * A miss costs both (~340ms), and a miss is exactly where the old answer was
+ * wrong, so that is the right place to spend it.
  */
 async function findByLabel(
   udid: string,
   label: string
 ): Promise<AXElement | null> {
   return companions.withClient(udid, async (client) => {
-    try {
+    const query = async (backend?: Backend): Promise<AXElement | null> => {
       const found = (await client.accessibilityInfo({
         marker: label,
         matchKey: SearchableKey.LABEL,
+        backend,
       })) as { elements?: AXElement } | null;
       const element = found?.elements;
       if (!element) return null;
@@ -125,9 +292,25 @@ async function findByLabel(
       // one element. Callers wanting structure have ui_describe_all.
       const { children, ...withoutSubtree } = element;
       return withoutSubtree as AXElement;
+    };
+
+    try {
+      const hit = await query();
+      if (hit) return hit;
     } catch (error) {
-      if (/found no element/i.test((error as Error).message)) return null;
-      throw error;
+      if (!/found no element/i.test((error as Error).message)) throw error;
+    }
+
+    try {
+      return await query(Backend.AXBRIDGE);
+    } catch (error) {
+      // Any AXBridge failure means "still not found", never a thrown error.
+      // A companion older than the one this server pins cannot start the
+      // backend at all and fails with an unrelated message about resolving the
+      // frontmost pid; surfacing that in place of "no element found" would
+      // send the caller chasing an accessibility misconfiguration instead of a
+      // label that genuinely is not on screen.
+      return null;
     }
   });
 }
@@ -568,7 +751,8 @@ const SERVER_INSTRUCTIONS =
   "iOS Simulator MCP server. Every tool takes an `id` identifying your session, which owns one simulator. " +
   "Choose a distinctive id for yourself (e.g. \"qa-login-flow\", not \"test\") and reuse it for every call — other agents may be driving their own simulators on this same server, and sharing an id means taking over each other's. Calling start_simulator again with the same id resumes your existing simulator. Call destroy_simulator when finished.\n" +
   "Do not use `xcrun simctl`, `idb`, or other shell commands to control simulators; this server owns their lifecycle and cannot see changes made behind its back.\n" +
-  "Navigation: if you know what you want, tap it by name — ui_tap {label} resolves the element on the simulator and taps its centre, costing a few hundred bytes and no coordinate handling. ui_find {label} locates an element, or reports it absent as a normal answer, so it is safe to poll while waiting for a screen. Only use ui_describe_all when you do not know what is on screen: it returns the whole tree and is several kilobytes. Labels match by case-sensitive substring.\n" +
+  "Navigation: if you know what you want, tap it by name — ui_tap {label} resolves the element on the simulator and taps its centre, costing a few hundred bytes and no coordinate handling. ui_find {label} locates an element, or reports it absent as a normal answer. Only use ui_describe_all when you do not know what is on screen: it returns the whole tree and is several kilobytes. Labels match by case-sensitive substring.\n" +
+  "ui_describe_all reads the app's real view hierarchy, so it includes controls in tab bars, nav bars and toolbars, and is pruned to elements you can act on. It and a failed ui_find each cost ~300ms, so do not poll either in a tight loop.\n" +
   "Coordinates are logical screen space. ui_describe_all frames feed directly into ui_tap, ui_swipe and ui_describe_point.\n" +
   "Visual checks: if asked whether something looks right — layout, colour, alignment, anything about appearance — call ui_view and look at the screenshot. The accessibility tree shows what exists, not how it renders; an element can be present and correctly labelled while looking completely wrong. Do not derive tap coordinates from a screenshot: those are pixel space and stop matching logical space once the device is rotated.";
 
@@ -862,11 +1046,12 @@ if (!isToolFiltered("ui_describe_all")) {
       handleToolError("Error describing all of the ui", async () => {
         const sim = getManagedSim(id);
 
-        // describeAll already restarts a wedged companion and retries; a
-        // degenerate tree here means something it cannot fix.
-        const elements = await describeAll(sim.udid);
+        const elements = await describeScreen(sim.udid);
         const screenFrame = elements[0]?.frame;
         if (isDegenerateTree(elements)) {
+          // describeAll restarts a wedged companion and retries; reaching a
+          // degenerate tree through that means something it cannot fix.
+          await describeAll(sim.udid);
           throw new Error(await diagnoseEmptyAccessibilityTree(sim.udid));
         }
 
