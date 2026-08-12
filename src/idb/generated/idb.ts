@@ -224,6 +224,17 @@ export interface AccessibilityInfoRequest {
    */
   keys: string[];
   backend: AccessibilityInfoRequest_Backend;
+  /**
+   * Collect element counts and timings for the read. Reported by the COMPLETE
+   * format only; the legacy formats collect but have nowhere to report, so
+   * their output is unchanged.
+   */
+  profile: boolean;
+  /**
+   * Collect upper-region frame coverage for the read. Reported by the
+   * COMPLETE format only, like profile.
+   */
+  collectFrameCoverage: boolean;
 }
 
 export enum AccessibilityInfoRequest_Format {
@@ -2592,7 +2603,17 @@ export const Point: MessageFns<Point> = {
 };
 
 function createBaseAccessibilityInfoRequest(): AccessibilityInfoRequest {
-  return { point: undefined, format: 0, marker: "", matchKey: 0, depth: 0, keys: [], backend: 0 };
+  return {
+    point: undefined,
+    format: 0,
+    marker: "",
+    matchKey: 0,
+    depth: 0,
+    keys: [],
+    backend: 0,
+    profile: false,
+    collectFrameCoverage: false,
+  };
 }
 
 export const AccessibilityInfoRequest: MessageFns<AccessibilityInfoRequest> = {
@@ -2617,6 +2638,12 @@ export const AccessibilityInfoRequest: MessageFns<AccessibilityInfoRequest> = {
     }
     if (message.backend !== 0) {
       writer.uint32(64).int32(message.backend);
+    }
+    if (message.profile !== false) {
+      writer.uint32(72).bool(message.profile);
+    }
+    if (message.collectFrameCoverage !== false) {
+      writer.uint32(80).bool(message.collectFrameCoverage);
     }
     return writer;
   },
@@ -2684,6 +2711,22 @@ export const AccessibilityInfoRequest: MessageFns<AccessibilityInfoRequest> = {
           message.backend = reader.int32() as any;
           continue;
         }
+        case 9: {
+          if (tag !== 72) {
+            break;
+          }
+
+          message.profile = reader.bool();
+          continue;
+        }
+        case 10: {
+          if (tag !== 80) {
+            break;
+          }
+
+          message.collectFrameCoverage = reader.bool();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -2705,6 +2748,8 @@ export const AccessibilityInfoRequest: MessageFns<AccessibilityInfoRequest> = {
     message.depth = object.depth ?? 0;
     message.keys = object.keys?.map((e) => e) || [];
     message.backend = object.backend ?? 0;
+    message.profile = object.profile ?? false;
+    message.collectFrameCoverage = object.collectFrameCoverage ?? false;
     return message;
   },
 };
