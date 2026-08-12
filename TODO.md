@@ -244,6 +244,18 @@ Two results that change the plan:
   - Their release is a **prerelease**, so anything consuming it automatically has to opt into prereleases or wait for promotion.
 - [ ] **#50** **Upstream's release artifact is misnamed: `idb-companion.universal.tar.gz` is arm64-only.** `build.sh` hardcodes `ARCHS=arm64` unconditionally in `common_settings` ([build.sh:276](vendor/idb/build.sh:276)) with the comment "build arm64 only (no Intel/x86_64 slices)", and `./build.sh build all` is exactly what `release.yml` runs. Verified against our own build of the same script: `lipo -archs` reports `arm64` for both `idb_companion` and `Resources/SimulatorFrameworkBridge`. Anyone on an Intel Mac who installs that tarball — or the homebrew formula it feeds — gets a binary that cannot run. Worth an upstream issue; it also means their release would not close our own Intel gap.
 
+## Shipped 2026-08-12 — and what the release taught
+
+2.0.0 published, could not start, deprecated within the hour; 2.0.1 fixes it.
+`@bufbuild/protobuf` is imported at runtime by the generated gRPC client and was
+never declared as a dependency — in the repository it resolved through
+`ts-proto`, a devDependency.
+
+- [ ] **#51** **Verification that never leaves the repository proves nothing about the package.** Everything passed before 2.0.0 shipped: it compiled, `npm pack` listed exactly the right ten files, the server ran from the working tree, and the *published companion* was verified end to end against a real simulator — downloaded from a clean cache, hash checked, driving Photos. The one thing never done was `npm install` the package into an empty directory and start it, which is the only environment where a missing dependency is missing. Checking package *contents* is not checking the package.
+  - Fixed for this class of bug: `publish.yml` now packs, installs into a temp directory and asks for an MCP `initialize` before publishing.
+  - The general lesson is broader than dependencies, and it is the same one as #47: the tests that would have caught this cost seconds, and the manual verification that did not catch it cost an afternoon of simulator boots.
+- [ ] **#52** Nothing verifies the repository state on push — no test job, no build check on PRs. The build only runs as a side effect of publishing (`prepare`) and of the companion workflow. A `tsc --noEmit` plus the packed-install smoke test on every push would be cheap and would have caught #51 before a tag existed.
+
 ## Verified working
 
 - [x] **Landscape coordinate transformation is correct.** With the device rotated left, `detect_rotation` returned `landscape_left`, and coordinates taken from landscape space tapped their intended targets: Library tab at (87.5, 360) switched to Library, Collections tab at (192.5, 360) switched back, and the nav bar `...` at (751, 46) opened the overflow menu. Round-tripped, so not a coincidence of an already-selected tab.
