@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.0.1
+
+**2.0.0 could not start. Use this instead.**
+
+The generated gRPC client imports `@bufbuild/protobuf/wire` at runtime, and that
+package was never declared as a dependency — in the repository it resolved
+through `ts-proto`, a devDependency, so it worked everywhere it was tested and
+nowhere it was installed. A fresh `npm install` of 2.0.0 exits immediately with
+`Cannot find module '@bufbuild/protobuf/wire'`.
+
+`@bufbuild/protobuf` is now a dependency, and `publish.yml` packs the tarball,
+installs it into an empty directory and starts the server before publishing, so
+a package that cannot run cannot ship.
+
+Nothing else changed; everything in 2.0.0 below applies.
+
 ## 2.0.0
 
 The release where the server stops depending on anything you have to install

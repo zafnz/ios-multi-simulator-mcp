@@ -22,4 +22,36 @@ jobs:
           node-version: "24.x"
           registry-url: "https://registry.npmjs.org"
       - run: npm ci
+
+      # Install the package the way a user does and start it, because the
+      # repository is not a realistic environment: devDependencies are present
+      # there, so a runtime import that is only a transitive devDependency
+      # resolves locally and fails for everyone else.
+      #
+      # 2.0.0 shipped exactly that. The generated gRPC client imports
+      # `@bufbuild/protobuf/wire`, which was reachable in the repo only through
+      # ts-proto, a devDependency. Every check passed -- it built, it packed
+      # with the right files, it ran from the working tree -- and the published
+      # package could not start at all.
+      - name: Smoke test the packed package
+        run: |
+          set -euo pipefail
+          TGZ="$(npm pack --silent | tail -1)"
+          WORK="$(mktemp -d)"
+          cp "$TGZ" "$WORK/"
+          cd "$WORK"
+          npm init -y >/dev/null
+          npm install "./$TGZ" --no-audit --no-fund >/dev/null
+
+          INIT='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}}'
+          RESPONSE="$(printf '%s\n' "$INIT" \
+            | node node_modules/ios-multi-simulator-mcp/build/index.js --stdio 2>&1 || true)"
+          echo "$RESPONSE" | head -c 400
+          echo
+          if ! grep -q '"serverInfo"' <<<"$RESPONSE"; then
+            echo "::error::The packed package did not answer an MCP initialize. It is not installable; refusing to publish."
+            exit 1
+          fi
+          echo "::notice::Packed package installs and answers initialize."
+
       - run: npm publish --access public
