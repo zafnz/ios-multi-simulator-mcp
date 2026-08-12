@@ -466,8 +466,10 @@ breaking-changes list, and error clearly if it is set.
 
 Ordered by how much they'd hurt if skipped.
 
-1. **The artifact runs on a machine that didn't build it** (R2). Assumed true,
-   **not yet verified — do this on the work laptop before step 5.** Concretely:
+1. **The artifact runs on a machine that didn't build it** (R2). ✅ **Verified
+   2026-08-12** — `npm run verify:download` on a second Mac. Automated by
+   `scripts/verify-companion-download.mjs`; re-run it whenever the companion is
+   rebuilt. Concretely:
    download the release tarball on a Mac that has never built idb, extract,
    `xattr -l idb_companion` (expect no `com.apple.quarantine`), then
    `./idb_companion --version` and a real `accessibility_info` call against a
@@ -516,26 +518,36 @@ get nothing.
 > a clear message pointing at the limitation — not a confusing download or
 > exec error. Note arm64-only in the README.
 
-### R2 — will a downloaded companion run on a machine that didn't build it? ⚠️ ASSUMED
+### R2 — will a downloaded companion run on a machine that didn't build it? ✅ VERIFIED
 
 The binary is `adhoc, linker-signed`, Mach-O thin arm64. Programmatic download
-(node/curl, not a browser) shouldn't set `com.apple.quarantine`, so Gatekeeper
-shouldn't engage.
+(node/curl, not a browser) doesn't set `com.apple.quarantine`, so Gatekeeper
+doesn't engage.
 
-> **Decision: assume it works; verify tomorrow on the work laptop.**
+> **Result: it works.** Verified 2026-08-12 on a second Mac that never built the
+> companion, via `npm run verify:download` against the published release: the
+> download hash-matched, no `com.apple.quarantine` attribute was present, and
+> the binary executed.
 >
-> This is an assumption, not a result. If it's wrong, the distribution model
-> changes materially — the fallbacks are ad-hoc re-signing on extract
+> Notably it loaded on a machine with **no full Xcode install**, so the
+> companion does not need Xcode merely to start — only to drive a simulator.
+> The simulator-control half was proven separately on the build machine; the two
+> risks are orthogonal and each is tested where it applies.
+>
+> The fallbacks are therefore not needed: ad-hoc re-signing on extract
 > (`codesign -f -s - --deep`), stripping quarantine
-> (`xattr -dr com.apple.quarantine`), or in the worst case a real Developer ID
-> signature + notarization, which would need an Apple developer account.
->
-> Build steps 1–4 do not depend on this. **Verify before step 5** (the download
-> path) so a bad assumption costs nothing already written.
+> (`xattr -dr com.apple.quarantine`), or a Developer ID signature +
+> notarization. Keep them noted in case a future macOS tightens this.
 
-### R3 — do GitHub runners have Xcode 26.6? ⚠️ ASSUMED
+### R3 — do GitHub runners have Xcode 26.6? ✅ VERIFIED
 
-Could not verify available runner images from here.
+> **Result: yes.** CI run 31588009183 on `macos-26` passed the toolchain
+> assertion (Xcode 26.6, swiftlang-6.3.3.1.3) and built the companion clean on
+> the first attempt. Keep the assertion step regardless — it is what turns a
+> future runner-image change into one legible line instead of a 25-minute build
+> that dies with no `error:` anywhere in the log.
+
+Original reasoning, kept for context:
 
 > **Decision: assume yes, on `macos-26`.**
 >
