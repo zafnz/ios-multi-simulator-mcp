@@ -136,7 +136,15 @@ export function resolveCompanion(
       throw error;
     });
   }
-  return pending;
+  // Nor should a success outlive the file it points at. Clearing the cache is
+  // advice we give in an error message, so a long-running server must notice
+  // the binary has gone and fetch it again rather than handing out a path that
+  // no longer exists until it is restarted.
+  return pending.then((binary) => {
+    if (isUsable(binary)) return binary;
+    pending = undefined;
+    return resolveCompanion(log);
+  });
 }
 
 async function resolveOnce(log: (message: string) => void): Promise<string> {

@@ -1259,8 +1259,11 @@ if (!isToolFiltered("ui_view")) {
             resizedJpg,
           ]);
 
-          // Rotate to match logical orientation
-          // sips --rotate rotates counter-clockwise
+          // Rotate to match logical orientation.
+          // sips --rotate turns the image clockwise by the given angle. The
+          // mapping below is correct and consistent with
+          // transformPointToPortrait; an earlier comment here said
+          // counter-clockwise, which was wrong about sips, not about the code.
           let rotateDegrees: number | null = null;
           switch (orientation) {
             case "landscape_right":
@@ -1942,6 +1945,22 @@ async function runHttp() {
     const peer = `${socket.remoteAddress}:${socket.remotePort}`;
     vlog(`client ${peer} connected`);
     socket.on("close", () => vlog(`client ${peer} disconnected`));
+  });
+
+  // Without a listener, a failure to bind is an unhandled 'error' event: the
+  // process dies on a raw stack trace. EADDRINUSE is likely now that http is
+  // the default and a second server may be started by habit.
+  httpServer.on("error", (err: NodeJS.ErrnoException) => {
+    if (err.code === "EADDRINUSE") {
+      console.error(
+        `Port ${port} on ${host} is already in use. Another ios-multi-simulator-mcp ` +
+          `is probably already running — point your client at it, or choose another ` +
+          `port with --port.`
+      );
+    } else {
+      console.error(`HTTP server error: ${err.message}`);
+    }
+    process.exit(1);
   });
 
   await new Promise<void>((resolve) => {

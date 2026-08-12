@@ -56,8 +56,12 @@ if (blockStart === -1) throw new Error("KEY_MAP not found in " + source);
 const blockEnd = text.indexOf("\n}", blockStart);
 const block = text.slice(blockStart, blockEnd);
 
+// The trailing comma is optional: Python allows the final dict entry without
+// one, and requiring it here would silently drop that character. The coverage
+// check below would not catch it either if the dropped entry were "\n", which
+// sits outside the printable-ASCII range it asserts on.
 const entryRe =
-  /^\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'):\s*key_press(_shifted)?_to_events\((\d+)\),/gm;
+  /^\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'):\s*key_press(_shifted)?_to_events\((\d+)\),?\s*$/gm;
 
 const entries = [];
 for (const m of block.matchAll(entryRe)) {
