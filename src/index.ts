@@ -578,7 +578,7 @@ function toError(input: unknown): Error {
 }
 
 function troubleshootingLink(): string {
-  return "[Troubleshooting Guide](https://github.com/zafnz/ios-simulator-mcp/blob/main/TROUBLESHOOTING.md) | [Plain Text Guide for LLMs](https://raw.githubusercontent.com/zafnz/ios-simulator-mcp/refs/heads/main/TROUBLESHOOTING.md)";
+  return "[Troubleshooting Guide](https://github.com/zafnz/ios-multi-simulator-mcp/blob/main/TROUBLESHOOTING.md) | [Plain Text Guide for LLMs](https://raw.githubusercontent.com/zafnz/ios-multi-simulator-mcp/refs/heads/main/TROUBLESHOOTING.md)";
 }
 
 function errorWithTroubleshooting(message: string): string {

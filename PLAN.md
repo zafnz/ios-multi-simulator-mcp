@@ -260,7 +260,7 @@ Then commit `companion.lock.json` into the branch:
   "xcode":   "26.6",
   "swift":   "swiftlang-6.3.3.1.3",
   "arch":    "arm64",
-  "url":     "https://github.com/zafnz/ios-simulator-mcp/releases/download/companion-7c90442/companion-7c90442-arm64.tar.gz",
+  "url":     "https://github.com/zafnz/ios-multi-simulator-mcp/releases/download/companion-7c90442/companion-7c90442-arm64.tar.gz",
   "sha256":  "…",
   "bytes":   30000000,
   "builtAt": "2026-08-09T…Z"

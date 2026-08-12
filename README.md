@@ -25,39 +25,99 @@ An MCP server that lets AI agents create, control, and destroy iOS simulators th
 ```
 
 **What this fork adds:**
+
 - **Session-based lifecycle** — `start_simulator` / `destroy_simulator` create and tear down simulators on demand, with automatic cleanup on server exit
 - **Multi-agent support** — each session gets an isolated simulator, so parallel agents don't collide
 - **Attach to existing simulators** — `attach_simulator` lets you control a simulator that was created externally (e.g. by Xcode)
+- **Tap by name** — `ui_tap { label: "Sign Up" }` resolves the element on the simulator and taps it, so the model never reads a tree or picks coordinates. Around 340 bytes instead of 7–10 KB
+- **No Python** — talks to `idb_companion` over gRPC directly. No `pipx`, no `fb-idb`, no `brew install`. A tap costs ~1.2 ms instead of the ~165 ms it took to spawn a Python process
+- **A current companion** — Homebrew's `idb_companion` is from 2022. This ships its own, built from a pinned upstream commit, which is what makes tap-by-name possible at all
+- **Self-healing accessibility** — the empty-tree failure that used to require destroying and recreating a simulator is now recovered automatically
 - Removed `get_booted_sim_id` / `open_simulator` / `IDB_UDID` — the session model replaces all of these
 
-## Tools
+## Prerequisites
 
-All tools take a required `id` (session identifier) parameter.
+- **Node.js** (v18+)
+- **macOS on Apple Silicon** — iOS simulators are macOS-only, and the companion is arm64 only
+- **Xcode** with iOS simulators installed
 
-| Tool | Additional Parameters | Description |
-|------|----------------------|-------------|
-| `start_simulator` | `type?` (e.g. "iPhone", "iPad", "iPhone 16 Pro") | Creates, boots, and opens a simulator for the session |
-| `destroy_simulator` | — | Shuts down and deletes the session's simulator |
-| `attach_simulator` | `udid` | Attaches to an existing booted simulator by UDID |
-| `detect_rotation` | — | Detects device rotation and updates coordinate mapping |
-| `ui_describe_all` | — | Returns accessibility tree for the entire screen (JSON) |
-| `ui_find` | `label` | Finds one element by accessibility label, without fetching the screen |
-| `ui_tap` | `label?`, `x?`, `y?`, `duration?` | Tap an element by label, or at coordinates |
-| `ui_type` | `text` | Type text into the focused field |
-| `ui_swipe` | `x_start`, `y_start`, `x_end`, `y_end`, `duration?`, `delta?` | Swipe gesture |
-| `ui_describe_point` | `x`, `y` | Returns the accessibility element at a point |
-| `ui_view` | — | Returns a compressed screenshot as base64 JPEG |
-| `screenshot` | `output_path`, `type?`, `display?`, `mask?` | Saves a screenshot to a file |
-| `record_video` | `output_path?`, `codec?`, `display?`, `mask?`, `force?` | Starts video recording |
-| `stop_recording` | — | Stops the current recording |
-| `install_app` | `app_path` | Installs a .app or .ipa on the simulator |
-| `launch_app` | `bundle_id`, `terminate_running?` | Launches an app by bundle identifier |
+That is the whole list. You do not install `idb_companion` yourself, and there is
+no Python involved. See [How `idb_companion` is obtained](#how-idb_companion-is-obtained).
 
-## `ui_describe_all` — the key navigation tool
+## Installation
 
-`ui_view` lets the agent visually see the screen with a compressed jpg image. While this is sufficient for the agent to determine where to click, it will not work if the screen is rotated. But `ui_describe_all` uses logical coordinates and will work fine for finding buttons to tap. Unless there is a good reason to do otherwise, I'd suggest telling agents to use `ui_describe_all` for navigation (though `ui_view` will work so long as the screen is in portrait)
+**Claude Code:**
 
-`ui_describe_all` returns a nested JSON accessibility tree. This is another way  the agent can "see" the screen to decide what to tap. Example (abbreviated):
+```bash
+claude mcp add ios-multi-simulator npx -y ios-multi-simulator-mcp
+```
+
+**Cursor and other config-file clients** (`~/.cursor/mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "ios-multi-simulator": {
+      "command": "npx",
+      "args": ["-y", "ios-multi-simulator-mcp"]
+    }
+  }
+}
+```
+
+Running from a checkout? Use `node /path/to/ios-multi-simulator-mcp/build/index.js`
+as the command instead. For multiple agents sharing one server, see
+[HTTP transport](#http-transport-multi-agent).
+
+## Example usage
+
+**Hot Tip:**
+
+You can use cheap agents like Haiku to do navigation and even visual comparison. You do not need Opus to navigate around your app, saving you tons of money and time. Haiku is _almost_ fast enough that you can record demo videos without speeding up ;)
+
+**Launch an app and navigate:**
+
+> Start an iPhone 16 Pro simulator, open Settings, and navigate to General > About.
+
+**Compare a screenshot against expected state:**
+
+> Take a screenshot of the simulator and check whether the login screen is showing
+> the "Welcome back" message.
+
+**Multi-step agent workflow (great for Haiku subagents):**
+
+> You are a QA agent. Start a simulator, install the app at ./build/MyApp.app,
+> launch it (com.example.myapp), then:
+> 1. Tap "Sign Up"
+> 2. Fill in the email field with "test@example.com" and password with "password123"
+> 3. Tap "Submit"
+> 4. Take a screenshot and verify the success message appears
+
+## Driving the UI
+
+There are two ways for an agent to act on the screen, and picking the right one
+is most of the difference between a cheap agent loop and an expensive one.
+
+### When you know what you want: `ui_tap` and `ui_find`
+
+```
+ui_tap  { id: "qa1", label: "Sign Up" }
+ui_find { id: "qa1", label: "Welcome back" }
+```
+
+The simulator resolves the element itself and returns only the match — a few
+hundred bytes, versus several kilobytes for a whole screen. `ui_tap` taps the
+centre of that element, so the model never handles a coordinate. `ui_find`
+returns the element without its subtree, and reports a miss as an ordinary
+answer rather than an error, so it is safe to poll with while waiting for
+something to appear.
+
+Matching is a case-sensitive substring match against the accessibility label.
+
+### When you need to look around: `ui_describe_all`
+
+Use this when the agent doesn't yet know what is on screen. It returns a nested
+JSON accessibility tree in logical coordinates. Example (abbreviated):
 
 ```json
 [
@@ -89,139 +149,39 @@ All tools take a required `id` (session identifier) parameter.
 ]
 ```
 
-The `frame` coordinates map directly to `ui_tap` coordinates — to tap "General", use the centre of its frame.
+The `frame` coordinates map directly to `ui_tap` coordinates — to tap "General",
+use the centre of its frame.
 
-### When you already know what you want: `ui_find` and `ui_tap(label:)`
+### Seeing the screen: `ui_view`
 
-Dumping the tree is the right move when the agent needs to *see* the screen. When
-it already knows what it is looking for, ask for that instead:
+`ui_view` returns a compressed screenshot, which is useful for *verifying* what
+an app looks like. It is a poor choice for navigation: screenshots are in pixel
+space while taps are in logical space, and the two do not line up once the
+device is rotated. Navigate with labels or `ui_describe_all`; use `ui_view` to
+check the result.
 
-```
-ui_tap  { id: "qa1", label: "Sign Up" }
-ui_find { id: "qa1", label: "Welcome back" }
-```
+## Tools
 
-The companion walks the tree itself and returns only the match — around 300–500
-bytes against 7–10 KB for a full screen, roughly **30x less**, in about 25 ms.
-`ui_tap` resolves the label to the centre of that element, so the model never
-handles coordinates. `ui_find` returns the element without its subtree, and
-answers "not found" as an ordinary result rather than an error, so it is safe to
-use to check whether something is on screen yet.
+All tools take a required `id` (session identifier) parameter.
 
-Matching is a case-sensitive substring match against the accessibility label.
-
-## Example usage
-
-**Hot Tip:**
-
-You can use cheap agents like Haiku to do navigation and even visual comparison. You do not need Opus to navigate around your app, saving you tons of money and time. Haiku is _almost_ fast enough that you can record demo videos without speeding up ;)
-
-**Launch an app and navigate:**
-
-> Start an iPhone 16 Pro simulator, open Settings, and navigate to General > About.
-
-**Compare a screenshot against expected state:**
-
-> Take a screenshot of the simulator and check whether the login screen is showing
-> the "Welcome back" message.
-
-
-**Multi-step agent workflow (great for Haiku subagents):**
-
-> You are a QA agent. Start a simulator, install the app at ./build/MyApp.app,
-> launch it (com.example.myapp), then:
-> 1. Tap "Sign Up"
-> 2. Fill in the email field with "test@example.com" and password with "password123"
-> 3. Tap "Submit"
-> 4. Take a screenshot and verify the success message appears
-
-## Prerequisites
-
-- **Node.js** (v18+)
-- **macOS on Apple Silicon** (iOS simulators are macOS-only, and the companion
-  binary is arm64 only — Intel Macs are not supported)
-- **Xcode** with iOS simulators installed
-
-That is the whole list. You do **not** install `idb_companion` yourself — the
-server obtains it, see [How `idb_companion` is obtained](#how-idb_companion-is-obtained).
-And there is **no Python involved** — this server speaks gRPC to the companion
-directly, so you do not need `pipx`, `fb-idb`, or the `idb` command line tool.
-
-> Upgrading from a version that asked for `fb-idb`? You can safely
-> `pipx uninstall fb-idb`. It is no longer used. See
-> [Breaking changes](#breaking-changes).
-
-### How `idb_companion` is obtained
-
-The server resolves the companion binary in this order, and uses the first one
-it finds:
-
-1. **`IOS_SIMULATOR_MCP_COMPANION_PATH`**, if set — used verbatim.
-2. **A locally built companion** at `vendor/idb/Build/Distribution/idb_companion`.
-   This is the developer path; it only exists if you have built the vendored
-   idb submodule yourself (see [CONTRIBUTING.md](CONTRIBUTING.md)).
-3. **A downloaded companion.** The URL and its sha256 are pinned in
-   `companion.lock.json`. The download is verified against that hash and cached
-   under `~/Library/Caches/ios-multi-simulator-mcp/companion/<sha256>/`, so it
-   happens once. Set `IOS_SIMULATOR_MCP_COMPANION_CACHE` to use a different
-   cache root.
-4. **Otherwise the server fails with a clear error.**
-
-Note what is *not* in that list: there is deliberately **no fallback to an
-`idb_companion` on your `PATH`** — including one installed with
-`brew install idb-companion`. An older companion does not reject request fields
-it does not understand, it silently ignores them, so falling back to whatever
-happens to be installed would produce wrong-but-plausible results instead of a
-clean failure. If you do want to use your own build, point
-`IOS_SIMULATOR_MCP_COMPANION_PATH` at it and you own the compatibility.
-
-## Installation
-
-### Cursor
-
-Add to `~/.cursor/mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "ios-multi-simulator": {
-      "command": "npx",
-      "args": ["-y", "github:zafnz/ios-multi-simulator-mcp"]
-    }
-  }
-}
-```
-
-For local development, build from source and point to the built file:
-
-```json
-{
-  "mcpServers": {
-    "ios-multi-simulator": {
-      "command": "node",
-      "args": ["/path/to/ios-multi-simulator-mcp/build/index.js"]
-    }
-  }
-}
-```
-
-### Claude Code
-
-```bash
-claude mcp add ios-multi-simulator npx -y github:zafnz/ios-multi-simulator-mcp
-```
-
-For local development:
-
-```bash
-claude mcp add ios-multi-simulator -- node /path/to/ios-multi-simulator-mcp/build/index.js
-```
-
-## Troubleshooting
-
-**Rotated screen**
-
-The rotated screen is a problem when using `ui_view` due to the tapping and swipping using logical coordinate space, but the ui_view returning the pixel space, which when rotated don't align. Tell the agent to use `ui_describe_all` to navigate -- it uses less tokens anyhow. 
+| Tool | Additional Parameters | Description |
+|------|----------------------|-------------|
+| `start_simulator` | `type?` (e.g. "iPhone", "iPad", "iPhone 16 Pro") | Creates, boots, and opens a simulator for the session |
+| `destroy_simulator` | — | Shuts down and deletes the session's simulator |
+| `attach_simulator` | `udid` | Attaches to an existing booted simulator by UDID |
+| `detect_rotation` | — | Detects device rotation and updates coordinate mapping |
+| `ui_find` | `label` | Finds one element by accessibility label, without fetching the screen |
+| `ui_tap` | `label?`, `x?`, `y?`, `duration?` | Tap an element by label, or at coordinates |
+| `ui_describe_all` | — | Returns accessibility tree for the entire screen (JSON) |
+| `ui_type` | `text` | Type text into the focused field |
+| `ui_swipe` | `x_start`, `y_start`, `x_end`, `y_end`, `duration?`, `delta?` | Swipe gesture |
+| `ui_describe_point` | `x`, `y` | Returns the accessibility element at a point |
+| `ui_view` | — | Returns a compressed screenshot as base64 JPEG |
+| `screenshot` | `output_path`, `type?`, `display?`, `mask?` | Saves a screenshot to a file |
+| `record_video` | `output_path?`, `codec?`, `display?`, `mask?`, `force?` | Starts video recording |
+| `stop_recording` | — | Stops the current recording |
+| `install_app` | `app_path` | Installs a .app or .ipa on the simulator |
+| `launch_app` | `bundle_id`, `terminate_running?` | Launches an app by bundle identifier |
 
 ## Configuration
 
@@ -239,22 +199,7 @@ The rotated screen is a problem when using `ui_view` due to the tapping and swip
 | `IOS_SIMULATOR_MCP_CLEANUP_ON_EXIT` | Destroy owned simulators when the server shuts down (default: `true`) | `false` |
 | `IOS_SIMULATOR_MCP_VERBOSE` | Log client connections and tool calls to stderr in HTTP mode (default: `false`) | `true` |
 
-Example with env vars:
-
-```json
-{
-  "mcpServers": {
-    "ios-multi-simulator": {
-      "command": "npx",
-      "args": ["-y", "ios-multi-simulator-mcp"],
-      "env": {
-        "IOS_SIMULATOR_MCP_DEFAULT_OUTPUT_DIR": "~/Code/project/tmp",
-        "IOS_SIMULATOR_MCP_COMPANION_PATH": "~/idb/Build/Distribution/idb_companion"
-      }
-    }
-  }
-}
-```
+Set them in the `env` block of your MCP client config.
 
 ### HTTP transport (multi-agent)
 
@@ -267,21 +212,11 @@ simulators against a single shared server — and to let an agent disconnect and
 later reconnect to the same simulator using the same session `id` — run one
 long-lived server in **HTTP** mode.
 
-Using CLI flags:
-
 ```bash
 npx -y ios-multi-simulator-mcp --http --port 8008
 ```
 
-Or the equivalent environment variables:
-
-```bash
-IOS_SIMULATOR_MCP_TRANSPORT=http \
-IOS_SIMULATOR_MCP_HTTP_PORT=8008 \
-  npx -y ios-multi-simulator-mcp
-```
-
-CLI flags take precedence over the environment variables:
+CLI flags take precedence over the equivalent environment variables:
 
 | Flag | Equivalent env var |
 |------|--------------------|
@@ -327,6 +262,32 @@ destroyed when the server itself shuts down unless
 > `127.0.0.1` by default. Do not expose the port to untrusted networks — the
 > server can create and control simulators and run screen recordings.
 
+## How `idb_companion` is obtained
+
+The server resolves the companion binary in this order, using the first it finds:
+
+1. **`IOS_SIMULATOR_MCP_COMPANION_PATH`**, if set — used verbatim.
+2. **A locally built companion** at `vendor/idb/Build/Distribution/idb_companion`,
+   if you have built the vendored idb submodule (see [CONTRIBUTING.md](CONTRIBUTING.md)).
+3. **A downloaded companion**, pinned by URL and sha256 in `companion.lock.json`,
+   verified against that hash and cached — so it downloads once.
+4. **Otherwise the server fails with a clear error.**
+
+There is deliberately no fallback to an `idb_companion` on your `PATH`, including
+a Homebrew one, which is simply ignored. An older companion silently ignores
+request fields it does not understand rather than rejecting them, so falling back
+would produce wrong-but-plausible results instead of a clean failure. Details in
+[TROUBLESHOOTING.md](TROUBLESHOOTING.md).
+
+## Troubleshooting
+
+**Rotated screen** — `ui_view` returns pixel space while taps use logical space,
+so they don't align once rotated. Navigate with `ui_tap { label }` or
+`ui_describe_all` instead; both use logical coordinates, and both cost fewer
+tokens anyway.
+
+For everything else, see [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
+
 ## Breaking changes
 
 ### Python `fb-idb` is no longer used
@@ -338,19 +299,14 @@ to the Python `idb` command line tool.
   removed with `pipx uninstall fb-idb`.
 - **`brew install idb-companion` is no longer needed either.** The server
   obtains a pinned companion itself and never falls back to one on your `PATH`,
-  so a Homebrew companion is simply ignored. See
-  [How `idb_companion` is obtained](#how-idb_companion-is-obtained).
+  so a Homebrew companion is simply ignored.
 - **`IOS_SIMULATOR_MCP_IDB_PATH` has been removed.** It pointed at the `idb`
   CLI, which is no longer run. The server now fails at startup with an
   explanation if it is set, rather than ignoring it and leaving you to believe
   a custom `idb` is in use. Use `IOS_SIMULATOR_MCP_COMPANION_PATH` to select a
   specific `idb_companion` binary.
-
-Why it is worth the upgrade: every UI call used to spawn a Python process,
-which cost roughly 165ms per tap. Over a persistent connection the same tap
-takes about 1.2ms. The server also now manages `idb_companion` itself, which
-means an empty accessibility tree — previously only fixable by destroying and
-recreating the simulator — is recovered automatically.
+- **Apple Silicon only.** The companion is built arm64-only; Intel Macs are no
+  longer supported.
 
 ## License
 

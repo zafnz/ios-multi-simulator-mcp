@@ -7,7 +7,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/zafnz/ios-simulator-mcp.git"
+    "url": "git+https://github.com/zafnz/ios-multi-simulator-mcp.git"
   },
   "files": [
     "build",

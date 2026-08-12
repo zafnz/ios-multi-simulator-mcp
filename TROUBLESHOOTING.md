@@ -167,7 +167,7 @@ error, or `xcrun simctl list devices | grep Booted`), then collect:
    or launched beforehand.
 
 Include all of the above when you [open an
-issue](https://github.com/zafnz/ios-simulator-mcp/issues).
+issue](https://github.com/zafnz/ios-multi-simulator-mcp/issues).
 
 ## 4. Still Stuck?
 - Check the [README](./README.md) for setup and usage instructions.
