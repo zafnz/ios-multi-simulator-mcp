@@ -10,8 +10,13 @@ name: Build idb_companion
 # The `paths` filter alone is not enough. It matches whenever the vendor/idb
 # entry differs from the previous commit, which includes merging a branch into
 # main where the submodule was already at that commit — a rebuild producing a
-# byte-identical artifact. The guard job below compares the actual pins against
-# the previous commit and skips the build when neither moved.
+# byte-identical artifact. The guard job below asks whether a release for these
+# exact pins already exists and skips the build when one does.
+#
+# A push that does need a build also publishes it. The alternative — build on
+# push, publish only on a manual dispatch — meant every push built a companion
+# and threw it away into an artifact, and the release had to be cut by hand
+# afterwards.
 on:
   workflow_dispatch:
     inputs:
@@ -41,11 +46,9 @@ jobs:
       build: ${{ steps.check.outputs.build }}
       reason: ${{ steps.check.outputs.reason }}
     steps:
+      # Shallow is enough: the guard reads the pins at this commit and asks the
+      # releases API about them. Nothing here walks history.
       - uses: actions/checkout@v4
-        with:
-          # Full history: the comparison point is where the push started, which
-          # may be many commits back.
-          fetch-depth: 0
 
       - id: check
         env:
@@ -65,58 +68,30 @@ jobs:
           NEW_SHA="$(git ls-tree HEAD vendor/idb | awk '{print $3}')"
           NEW_XCODE="$(tr -d '[:space:]' < .xcode-version)"
 
-          # Already published for these exact pins? Then there is nothing to
-          # build, whatever the diff says. This is the authoritative check: the
-          # release is the artifact, and the build step downstream refuses to
-          # overwrite one that exists.
+          # One question decides it: is there already a published artifact for
+          # these exact pins? The release *is* the artifact, so its existence is
+          # the authoritative answer, and it needs no history to work out.
           #
-          # It is what makes merging a branch to main cheap. From main's
-          # perspective the pin genuinely did move — its previous tip still had
-          # the old sha — so the diff below says "build", the macOS runner
-          # starts, spends ~30 minutes at 10x billing, and only then hits the
-          # refuse-to-overwrite guard and fails. Asking about the release here
-          # turns that into a ten-second skip.
+          # This replaces a comparison of the pins against the previous commit,
+          # which asked a subtly different question and got it wrong twice.
+          # Merging a branch to main looks like a pin move from main's side --
+          # its previous tip still has the old sha -- so it rebuilt for ~30
+          # minutes at 10x billing and then refused to overwrite the release it
+          # had already published from the branch. Conversely, a second push to
+          # a branch whose pins have no release yet looks unchanged, so the
+          # build that the pin bump still needs was skipped.
+          #
+          # The `paths` filter above is the first gate: this job only runs at all
+          # when vendor/idb, .xcode-version or this workflow changed. Asking
+          # about the release is the second, and between them there is nothing
+          # left for a diff to add.
           TAG="companion-${NEW_SHA:0:7}-xcode${NEW_XCODE}"
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "build=false" >> "$GITHUB_OUTPUT"
             echo "reason=$TAG is already published; these pins have an artifact" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          # Compare against where the push started, not HEAD^. A push of several
-          # commits that bumps the pin in any commit but the last would look
-          # unchanged at the tip, and the build that the bump needs would be
-          # skipped -- leaving a pinned sha with no release, and a checked-in
-          # client generated from a sha newer than the published companion.
-          BEFORE="${{ github.event.before }}"
-          if [ "${{ github.event_name }}" != "push" ] || \
-             [ -z "$BEFORE" ] || \
-             [ "$BEFORE" = "0000000000000000000000000000000000000000" ] || \
-             ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
-            BEFORE="$(git rev-parse -q --verify HEAD^ || true)"
-          fi
-
-          if [ -z "$BEFORE" ]; then
-            echo "build=true" >> "$GITHUB_OUTPUT"
-            echo "reason=nothing to compare against" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          echo "comparing against $BEFORE"
-          OLD_SHA="$(git ls-tree "$BEFORE" vendor/idb | awk '{print $3}' || true)"
-          OLD_XCODE="$(git show "$BEFORE:.xcode-version" 2>/dev/null | tr -d '[:space:]' || true)"
-
-          echo "idb:   ${OLD_SHA:-none} -> ${NEW_SHA:-none}"
-          echo "xcode: ${OLD_XCODE:-none} -> ${NEW_XCODE:-none}"
-
-          if [ "$NEW_SHA" != "$OLD_SHA" ]; then
-            echo "build=true" >> "$GITHUB_OUTPUT"
-            echo "reason=idb pin moved to ${NEW_SHA:0:7}" >> "$GITHUB_OUTPUT"
-          elif [ "$NEW_XCODE" != "$OLD_XCODE" ]; then
-            echo "build=true" >> "$GITHUB_OUTPUT"
-            echo "reason=toolchain pin moved to $NEW_XCODE" >> "$GITHUB_OUTPUT"
           else
-            echo "build=false" >> "$GITHUB_OUTPUT"
-            echo "reason=idb ${NEW_SHA:0:7} and Xcode $NEW_XCODE both unchanged" >> "$GITHUB_OUTPUT"
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            echo "reason=no release for idb ${NEW_SHA:0:7} on Xcode $NEW_XCODE yet" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Report
@@ -297,7 +272,7 @@ jobs:
       # checksum for every install of every version that pinned it. Delete the
       # release by hand if you genuinely mean to replace it.
       - name: Refuse to overwrite an existing release
-        if: inputs.publish != false
+        if: github.event_name != 'workflow_dispatch' || inputs.publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -313,7 +288,7 @@ jobs:
           echo "$TAG does not exist yet — safe to publish."
 
       - name: Publish release
-        if: inputs.publish != false
+        if: github.event_name != 'workflow_dispatch' || inputs.publish
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.package.outputs.tag }}
@@ -350,7 +325,7 @@ jobs:
       # This cannot retrigger the build -- companion.lock.json is not in the
       # `paths` filter, and pushes made with GITHUB_TOKEN do not start workflows.
       - name: Commit companion.lock.json to the branch
-        if: inputs.publish != false
+        if: github.event_name != 'workflow_dispatch' || inputs.publish
         run: |
           set -euo pipefail
           if git diff --quiet -- companion.lock.json; then
