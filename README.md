@@ -1,6 +1,6 @@
 # iOS Multi-Simulator MCP Server
 
-Forked from [joshuayoes/ios-simulator-mcp](https://github.com/joshuayoes/ios-simulator-mcp) — all foundational work by Joshua Yoes.
+Forked from [joshuayoes/ios-simulator-mcp](https://github.com/joshuayoes/ios-simulator-mcp) — all foundational work by Joshua Yoes, but this fork adds some substantial new features and is not directly compatible. This fork does _NOT_ require idb-companion nor idb python cli scripts to be installed. It is a lot faster than the original.
 
 An MCP server that lets AI agents create, control, and destroy iOS simulators through session-based lifecycle management. Each session owns its own simulator, enabling multiple agents to work in parallel on separate simulators without conflicts.
 
@@ -41,15 +41,21 @@ An MCP server that lets AI agents create, control, and destroy iOS simulators th
 - **macOS on Apple Silicon** — iOS simulators are macOS-only, and the companion is arm64 only
 - **Xcode** with iOS simulators installed
 
-That is the whole list. You do not install `idb_companion` yourself, and there is
-no Python involved. See [How `idb_companion` is obtained](#how-idb_companion-is-obtained).
+That is the whole list. You do NOT install `idb_companion` yourself — the server
+fetches a pinned one on first use. See
+[How `idb_companion` is obtained](#how-idb_companion-is-obtained).
 
 ## Installation
+
+First run the mcp in http mode:
+```
+npx -y ios-multi-simulator-mcp --port 54321
+```
 
 **Claude Code:**
 
 ```bash
-claude mcp add ios-multi-simulator npx -y ios-multi-simulator-mcp
+claude mcp add --transport http ios-multi-simulator http://localhost:54321/mcp
 ```
 
 **Cursor and other config-file clients** (`~/.cursor/mcp.json`):
@@ -58,26 +64,33 @@ claude mcp add ios-multi-simulator npx -y ios-multi-simulator-mcp
 {
   "mcpServers": {
     "ios-multi-simulator": {
-      "command": "npx",
-      "args": ["-y", "ios-multi-simulator-mcp"]
+      "type": "http",
+      "url": "http://127.0.0.1:54321/mcp"
     }
   }
 }
 ```
 
-Running from a checkout? Use `node /path/to/ios-multi-simulator-mcp/build/index.js`
-as the command instead. For multiple agents sharing one server, see
-[HTTP transport](#http-transport-multi-agent).
-
 ## Example usage
 
-**Hot Tip:**
+The internal help should allow your agent to figure out how to drive it, but
+[AGENT_INSTRUCTIONS.md](AGENT_INSTRUCTIONS.md) can be provided for more concrete
+examples. In our testing the instructions below are typically sufficient.
 
-You can use cheap agents like Haiku to do navigation and even visual comparison. You do not need Opus to navigate around your app, saving you tons of money and time. Haiku is _almost_ fast enough that you can record demo videos without speeding up ;)
+Each agent picks a distinct session `id` and passes it to every tool. Because
+all state lives in the one shared server process, that simulator survives the
+agent disconnecting; calling `start_simulator` again with the same `id` resumes
+the existing simulator instead of creating a new one. Owned simulators are
+destroyed when the server itself shuts down unless
+`IOS_SIMULATOR_MCP_CLEANUP_ON_EXIT=false`.
+
+> **Security note:** the HTTP transport is unauthenticated and binds to
+> `127.0.0.1` by default. Do not expose the port to untrusted networks — the
+> server can create and control simulators and run screen recordings.
 
 **Launch an app and navigate:**
 
-> Start an iPhone 16 Pro simulator, open Settings, and navigate to General > About.
+> Use ios-multi-simulator to start an iPhone 16 Pro simulator, open Settings, and navigate to General > About.
 
 **Compare a screenshot against expected state:**
 
@@ -92,6 +105,10 @@ You can use cheap agents like Haiku to do navigation and even visual comparison.
 > 2. Fill in the email field with "test@example.com" and password with "password123"
 > 3. Tap "Submit"
 > 4. Take a screenshot and verify the success message appears
+
+**Pro Tip:**
+
+You can use cheap agents like Haiku to do navigation and even visual comparison. You do not need Opus to navigate around your app, saving you tons of money and time. Haiku is _almost_ fast enough that you can record demo videos without speeding up ;)
 
 ## Driving the UI
 
@@ -117,40 +134,7 @@ Matching is a case-sensitive substring match against the accessibility label.
 ### When you need to look around: `ui_describe_all`
 
 Use this when the agent doesn't yet know what is on screen. It returns a nested
-JSON accessibility tree in logical coordinates. Example (abbreviated):
-
-```json
-[
-  {
-    "type": "Application",
-    "frame": { "x": 0, "y": 0, "width": 393, "height": 852 },
-    "role_description": "application",
-    "title": "Settings",
-    "children": [
-      {
-        "type": "NavigationBar",
-        "frame": { "x": 0, "y": 59, "width": 393, "height": 96 },
-        "children": [
-          {
-            "type": "StaticText",
-            "frame": { "x": 152, "y": 75, "width": 89, "height": 25 },
-            "title": "Settings"
-          }
-        ]
-      },
-      {
-        "type": "Cell",
-        "frame": { "x": 0, "y": 200, "width": 393, "height": 44 },
-        "title": "General",
-        "AXAccessibilityElement": true
-      }
-    ]
-  }
-]
-```
-
-The `frame` coordinates map directly to `ui_tap` coordinates — to tap "General",
-use the centre of its frame.
+JSON accessibility tree in logical coordinates.
 
 ### Seeing the screen: `ui_view`
 
@@ -185,36 +169,7 @@ All tools take a required `id` (session identifier) parameter.
 
 ## Configuration
 
-### Environment Variables
-
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `IOS_SIMULATOR_MCP_FILTERED_TOOLS` | Comma-separated list of tool names to hide | `screenshot,record_video` |
-| `IOS_SIMULATOR_MCP_DEFAULT_OUTPUT_DIR` | Default directory for screenshots and recordings (default: `~/Downloads`) | `~/Code/project/tmp` |
-| `IOS_SIMULATOR_MCP_COMPANION_PATH` | Custom path to the `idb_companion` binary, used verbatim and ahead of everything else | `~/idb/Build/Distribution/idb_companion` |
-| `IOS_SIMULATOR_MCP_COMPANION_CACHE` | Cache root for the downloaded companion (default: `~/Library/Caches/ios-multi-simulator-mcp`) | `~/.cache/imsm` |
-| `IOS_SIMULATOR_MCP_TRANSPORT` | Transport to use: `stdio` (default) or `http` | `http` |
-| `IOS_SIMULATOR_MCP_HTTP_HOST` | Bind address in HTTP mode (default: `127.0.0.1`) | `127.0.0.1` |
-| `IOS_SIMULATOR_MCP_HTTP_PORT` | Listen port in HTTP mode (default: `8008`) | `8008` |
-| `IOS_SIMULATOR_MCP_CLEANUP_ON_EXIT` | Destroy owned simulators when the server shuts down (default: `true`) | `false` |
-| `IOS_SIMULATOR_MCP_VERBOSE` | Log client connections and tool calls to stderr in HTTP mode (default: `false`) | `true` |
-
-Set them in the `env` block of your MCP client config.
-
-### HTTP transport (multi-agent)
-
-By default the server runs over **stdio**, where each MCP client spawns its own
-private server process — so simulator sessions are not shared between separate
-clients.
-
-To let multiple agents (separate Claude/Cursor instances) drive their own
-simulators against a single shared server — and to let an agent disconnect and
-later reconnect to the same simulator using the same session `id` — run one
-long-lived server in **HTTP** mode.
-
-```bash
-npx -y ios-multi-simulator-mcp --http --port 8008
-```
+### CLI Flags
 
 CLI flags take precedence over the equivalent environment variables:
 
@@ -227,8 +182,34 @@ CLI flags take precedence over the equivalent environment variables:
 
 (Each value flag also accepts the `--flag=value` form.)
 
-With `--verbose`, the server logs client connections and each call to stderr:
+### Environment Variables
 
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `IOS_SIMULATOR_MCP_FILTERED_TOOLS` | Comma-separated list of tool names to hide | `screenshot,record_video` |
+| `IOS_SIMULATOR_MCP_DEFAULT_OUTPUT_DIR` | Default directory for screenshots and recordings (default: `~/Downloads`) | `~/Code/project/tmp` |
+| `IOS_SIMULATOR_MCP_COMPANION_PATH` | Custom path to the `idb_companion` binary, used verbatim and ahead of everything else | `~/idb/Build/Distribution/idb_companion` |
+| `IOS_SIMULATOR_MCP_COMPANION_CACHE` | Cache root for the downloaded companion (default: `~/Library/Caches/ios-multi-simulator-mcp`) | `~/.cache/imsm` |
+| `IOS_SIMULATOR_MCP_TRANSPORT` | Transport to use: `http` (default) or `stdio` | `stdio` |
+| `IOS_SIMULATOR_MCP_HTTP_HOST` | Bind address in HTTP mode (default: `127.0.0.1`) | `127.0.0.1` |
+| `IOS_SIMULATOR_MCP_HTTP_PORT` | Listen port in HTTP mode (default: `8008`) | `8008` |
+| `IOS_SIMULATOR_MCP_CLEANUP_ON_EXIT` | Destroy owned simulators when the server shuts down (default: `true`) | `false` |
+| `IOS_SIMULATOR_MCP_VERBOSE` | Log client connections and tool calls to stderr in HTTP mode (default: `false`) | `true` |
+
+In http mode these belong in the shell that starts the server, since that is the
+process they configure — the client only holds a URL:
+
+```bash
+IOS_SIMULATOR_MCP_DEFAULT_OUTPUT_DIR=~/Code/project/tmp \
+  npx -y ios-multi-simulator-mcp --port 54321
+```
+
+In stdio mode, where the client spawns the server, set them in the `env` block
+of your MCP client config instead.
+
+### Verbose
+
+Adding --verbose shows the clients connecting and their commands. 
 ```
 iOS Simulator MCP server listening on http://127.0.0.1:8008/mcp (verbose)
 [2026-08-09T09:53:53.472Z] client 127.0.0.1:49630 connected
@@ -238,31 +219,27 @@ iOS Simulator MCP server listening on http://127.0.0.1:8008/mcp (verbose)
 [2026-08-09T09:53:55.100Z] client 127.0.0.1:49630 disconnected
 ```
 
-Then point each client at it as a remote MCP server:
+### Stdio mode
+
+By default it uses http mode, but if for some reason you want to use stdio, you can specify the `--stdio` flag. Note that in that case you won't have multi agent support, since that requires multiple agents talking to one mcp.
+
+In stdio mode the MCP client spawns the server itself, so the config is the
+usual `command` / `args` form rather than a URL:
 
 ```json
 {
   "mcpServers": {
     "ios-multi-simulator": {
-      "type": "http",
-      "url": "http://127.0.0.1:8008/mcp"
+      "command": "npx",
+      "args": ["-y", "ios-multi-simulator-mcp", "--stdio"]
     }
   }
 }
 ```
 
-Each agent picks a distinct session `id` and passes it to every tool. Because
-all state lives in the one shared server process, that simulator survives the
-agent disconnecting; calling `start_simulator` again with the same `id` resumes
-the existing simulator instead of creating a new one. Owned simulators are
-destroyed when the server itself shuts down unless
-`IOS_SIMULATOR_MCP_CLEANUP_ON_EXIT=false`.
-
-> **Security note:** the HTTP transport is unauthenticated and binds to
-> `127.0.0.1` by default. Do not expose the port to untrusted networks — the
-> server can create and control simulators and run screen recordings.
-
 ## How `idb_companion` is obtained
+
+This mcp still uses `idb_companion` but it uses a much more recent version than the 2022 version available via brew.
 
 The server resolves the companion binary in this order, using the first it finds:
 
@@ -290,7 +267,7 @@ For everything else, see [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
 ## Breaking changes
 
-### 2.0.0 — idb is no longer a dependency
+### 2.0.0 — http by default, idb is no longer a dependency
 
 The headline: **you no longer install anything from the idb project.** The
 server speaks gRPC to `idb_companion` directly instead of shelling out to the
@@ -309,6 +286,12 @@ Install went from five steps to one.
   specific `idb_companion` binary.
 - **Apple Silicon only.** The companion is built arm64-only; Intel Macs are no
   longer supported.
+- **http is now the default transport.** Sessions live in the server process, so
+  stdio — where every client spawns its own private server — cannot share a
+  simulator between agents, which is the point of this fork. An existing
+  `command`/`args` config will still work if you add `--stdio`, but the
+  recommended setup is now to run the server yourself and point clients at its
+  URL. See [Stdio mode](#stdio-mode).
 
 ## License
 

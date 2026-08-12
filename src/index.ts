@@ -560,8 +560,17 @@ async function diagnoseEmptyAccessibilityTree(udid: string): Promise<string> {
 
 // --- Server setup ---
 
+/**
+ * Sent to every client at handshake, so it is the only guidance most agents
+ * ever get. Kept dense: it costs tokens in every session.
+ */
 const SERVER_INSTRUCTIONS =
-  "iOS Simulator MCP server. All coordinates are in logical screen space — what you see on screen is what you use. ui_describe_all returns element positions in logical coordinates; pass those same coordinates to ui_tap, ui_swipe, and ui_describe_point. ui_view shows screenshots rotated to match the logical orientation. Do not derive tap coordinates from ui_view screenshots, as they may not match the logical coordinate system (especially when the device is rotated). ui_view is useful for visual verification but ui_describe_all is the reliable way to navigate.";
+  "iOS Simulator MCP server. Every tool takes an `id` identifying your session, which owns one simulator. " +
+  "Choose a distinctive id for yourself (e.g. \"qa-login-flow\", not \"test\") and reuse it for every call — other agents may be driving their own simulators on this same server, and sharing an id means taking over each other's. Calling start_simulator again with the same id resumes your existing simulator. Call destroy_simulator when finished.\n" +
+  "Do not use `xcrun simctl`, `idb`, or other shell commands to control simulators; this server owns their lifecycle and cannot see changes made behind its back.\n" +
+  "Navigation: if you know what you want, tap it by name — ui_tap {label} resolves the element on the simulator and taps its centre, costing a few hundred bytes and no coordinate handling. ui_find {label} locates an element, or reports it absent as a normal answer, so it is safe to poll while waiting for a screen. Only use ui_describe_all when you do not know what is on screen: it returns the whole tree and is several kilobytes. Labels match by case-sensitive substring.\n" +
+  "Coordinates are logical screen space. ui_describe_all frames feed directly into ui_tap, ui_swipe and ui_describe_point.\n" +
+  "Visual checks: if asked whether something looks right — layout, colour, alignment, anything about appearance — call ui_view and look at the screenshot. The accessibility tree shows what exists, not how it renders; an element can be present and correctly labelled while looking completely wrong. Do not derive tap coordinates from a screenshot: those are pixel space and stop matching logical space once the device is rotated.";
 
 function toError(input: unknown): Error {
   if (input instanceof Error) return input;
@@ -1686,7 +1695,7 @@ function createServer(): McpServer {
 
 /**
  * Parses CLI flags. Supported (CLI takes precedence over env vars):
- *   --http | --stdio            select transport
+ *   --http | --stdio            select transport (http is the default)
  *   --transport <stdio|http>    select transport
  *   --host <addr>               HTTP bind address
  *   --port <n>                  HTTP port
@@ -1743,12 +1752,19 @@ const cliArgs = parseArgs(process.argv.slice(2));
 const envTruthy = (v: string | undefined) =>
   ["1", "true", "yes"].includes((v ?? "").toLowerCase());
 
-/** Resolved transport config: CLI flag > env var > default. */
+/**
+ * Resolved transport config: CLI flag > env var > default.
+ *
+ * HTTP is the default as of 2.0.0. Sessions live in the server process, so
+ * stdio — where every client spawns its own private server — cannot share a
+ * simulator between agents, which is the point of this fork. stdio remains
+ * available via --stdio for a single client that wants to own its own server.
+ */
 const config = {
   transport: (
     cliArgs.transport ||
     process.env.IOS_SIMULATOR_MCP_TRANSPORT ||
-    "stdio"
+    "http"
   ).toLowerCase(),
   host: cliArgs.host || process.env.IOS_SIMULATOR_MCP_HTTP_HOST || "127.0.0.1",
   port: Number(cliArgs.port || process.env.IOS_SIMULATOR_MCP_HTTP_PORT || "8008"),
