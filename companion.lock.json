@@ -1,10 +1,10 @@
 {
-  "idbSha": "7c9044246fdce905dab2bbb6391278f96366f675",
+  "idbSha": "da0f89a6848e8e4aab1a4b0372a5001f209b198a",
   "xcode": "26.6",
   "swift": "swiftlang-6.3.3.1.3",
   "arch": "arm64",
-  "url": "https://github.com/zafnz/ios-multi-simulator-mcp/releases/download/companion-7c90442/companion-7c90442-arm64.tar.gz",
-  "sha256": "86cd821880eca8bd71bd7a6017681c3ffa794668d38d2f056f97624fb3cb5019",
-  "bytes": 19207700,
-  "builtAt": "2026-08-12T10:46:40Z"
+  "url": "https://github.com/zafnz/ios-multi-simulator-mcp/releases/download/companion-da0f89a-xcode26.6/companion-da0f89a-xcode26.6-arm64.tar.gz",
+  "sha256": "bb10bd54212c518770a51be0896cd16ed60cae0307f8ba8c8e2b582f1f5cc1cf",
+  "bytes": 19295501,
+  "builtAt": "2026-08-12T18:57:33Z"
 }
