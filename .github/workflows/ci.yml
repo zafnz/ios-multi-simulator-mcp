@@ -1,0 +1,29 @@
+name: CI
+
+# Cheap checks on every push and pull request. Before this, nothing verified the
+# repository at all: the build ran only as a side effect of publishing, so the
+# first environment to notice a broken package was npm.
+#
+# Ubuntu deliberately. Neither check needs a simulator -- one is a type check,
+# the other proves the packed module graph resolves and the server answers -- and
+# a macOS runner would cost 10x for no more signal.
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24.x"
+      - run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      # The check that 2.0.0 needed and did not have.
+      - name: Smoke test the packed package
+        run: npm run smoke

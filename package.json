@@ -24,7 +24,9 @@
     "start": "node build/index.js",
     "watch": "tsc --watch",
     "predev": "npm run build",
-    "dev": "npx @modelcontextprotocol/inspector node build/index.js"
+    "dev": "npx @modelcontextprotocol/inspector node build/index.js",
+    "typecheck": "tsc --noEmit",
+    "smoke": "bash scripts/smoke-packed.sh"
   },
   "keywords": [
     "ios",

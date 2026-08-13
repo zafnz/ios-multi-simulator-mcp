@@ -34,24 +34,6 @@ jobs:
       # with the right files, it ran from the working tree -- and the published
       # package could not start at all.
       - name: Smoke test the packed package
-        run: |
-          set -euo pipefail
-          TGZ="$(npm pack --silent | tail -1)"
-          WORK="$(mktemp -d)"
-          cp "$TGZ" "$WORK/"
-          cd "$WORK"
-          npm init -y >/dev/null
-          npm install "./$TGZ" --no-audit --no-fund >/dev/null
-
-          INIT='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}}'
-          RESPONSE="$(printf '%s\n' "$INIT" \
-            | node node_modules/ios-multi-simulator-mcp/build/index.js --stdio 2>&1 || true)"
-          echo "$RESPONSE" | head -c 400
-          echo
-          if ! grep -q '"serverInfo"' <<<"$RESPONSE"; then
-            echo "::error::The packed package did not answer an MCP initialize. It is not installable; refusing to publish."
-            exit 1
-          fi
-          echo "::notice::Packed package installs and answers initialize."
+        run: npm run smoke
 
       - run: npm publish --access public
