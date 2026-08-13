@@ -1,5 +1,44 @@
 # Changelog
 
+## 2.0.2
+
+Friction removal. Everything here is something an agent hit in the first minute.
+
+### `start_simulator` waits until the simulator can actually be driven
+
+It used to return as soon as `simctl boot` did, which is 30–90 seconds before
+the accessibility bridge answers anything. Every session began with a stretch of
+failures, and the error blamed "a fullscreen dialog" — so the natural response
+was to go looking for a dialog rather than to wait.
+
+It now polls until the simulator answers and reports how long that took, so the
+next call works. `attach_simulator` does the same, because a device reports
+"Booted" well before it is driveable. If the wait runs out, it says so and tells
+you to poll `ui_view` rather than pretending to be ready.
+
+The underlying idb error is also rewritten to name the cause it usually has.
+
+### Finding controls by the text you can see
+
+Two things made controls unfindable by name:
+
+- **Typography.** iOS labels a button `Don’t Allow` with a typographic
+  apostrophe. Asking for `Don't Allow` matched nothing. Curly quotes,
+  apostrophes, dashes and non-breaking spaces are now folded before comparing.
+- **Text that is not the label.** A control's visible text is not always its
+  accessibility label — search fields in particular have no label at all and
+  carry their text in `AXValue`, making them impossible to name. Lookups now
+  consider both, preferring label matches.
+
+### One shape from every tool
+
+The same element used to come back differently depending on how you found it:
+sixteen fields from `ui_find`, six from `ui_describe_point`, and a different
+`role` and `traits` depending on which accessibility backend answered. Every
+element now carries the same six fields — `AXLabel`, `AXValue`, `AXUniqueId`,
+`frame`, `type`, `enabled` — with empty ones omitted. `type` carries what `role`
+was for.
+
 ## 2.0.1
 
 **2.0.0 could not start. Use this instead.**

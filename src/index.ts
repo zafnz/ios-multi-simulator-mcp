@@ -121,6 +121,32 @@ const DESCRIBE_KEYS = [
   "enabled",
 ];
 
+/**
+ * Reduces an element to the one shape every tool returns.
+ *
+ * Enforced here rather than by asking the companion, because asking does not
+ * work everywhere: `keys` is honoured for point and whole-screen reads and
+ * ignored for marker queries, so `ui_find` came back with sixteen fields where
+ * `ui_describe_point` came back with six, for the same element. The backends
+ * also disagree with each other — the AX backend calls a tab
+ * `role: "AXRadioButton"` with populated `traits`, axbridge calls it
+ * `role: "Button"` with `traits: null` — so a caller keying off those fields saw
+ * different data depending on which path answered. Picking the fields they agree
+ * on, in one place, retires both problems; `type` carries what `role` was for.
+ *
+ * Null and empty values are dropped: a screen's worth of `"AXValue": null` is
+ * noise, and their absence is as informative as their emptiness.
+ */
+function canonicalise(element: AXElement): AXElement {
+  const out: AXElement = {};
+  for (const key of DESCRIBE_KEYS) {
+    const value = element[key];
+    if (value === null || value === undefined || value === "") continue;
+    out[key] = value;
+  }
+  return out;
+}
+
 /** Roles that are worth reporting even with no label or identifier. */
 const ACTIONABLE_TYPES = new Set([
   "Button",
@@ -179,8 +205,7 @@ function isInteresting(element: AXElement): boolean {
  * we have already paid to receive, and saves the model reading the half of the
  * tree that is anonymous group containers.
  *
- * Null and empty-string fields are dropped for the same reason: a screen's
- * worth of `"AXValue": null` is pure noise.
+ * Each kept node is reduced to the shape every tool returns; see `canonicalise`.
  */
 function pruneTree(elements: AXElement[]): AXElement[] {
   const visit = (element: AXElement): AXElement[] => {
@@ -188,12 +213,7 @@ function pruneTree(elements: AXElement[]): AXElement[] {
 
     if (!isInteresting(element)) return kept;
 
-    const out: AXElement = {};
-    for (const [key, value] of Object.entries(element)) {
-      if (key === "children") continue;
-      if (value === null || value === undefined || value === "") continue;
-      out[key] = value;
-    }
+    const out = canonicalise(element);
     if (kept.length) out.children = kept;
     return [out];
   };
@@ -202,12 +222,7 @@ function pruneTree(elements: AXElement[]): AXElement[] {
   // against, so it is kept whether or not it is interesting in its own right.
   return elements.flatMap((root) => {
     const children = (root.children ?? []).flatMap(visit);
-    const out: AXElement = {};
-    for (const [key, value] of Object.entries(root)) {
-      if (key === "children") continue;
-      if (value === null || value === undefined || value === "") continue;
-      out[key] = value;
-    }
+    const out = canonicalise(root);
     if (children.length) out.children = children;
     return [out];
   });
@@ -252,67 +267,121 @@ async function describeScreen(udid: string): Promise<AXElement[]> {
 }
 
 /**
- * Resolves a single element by its accessibility label, server-side.
+ * Folds away the differences between what a caller types and what iOS renders.
  *
- * The companion walks the tree and returns just the match — roughly half a
- * kilobyte, against several for a whole tree — so "tap the thing called X"
- * costs one small call instead of dumping the screen for the model to scan.
- * Returns null when nothing matches, which the companion reports as an error
- * rather than an empty result.
+ * A caller asking for "Don't Allow" types an ASCII apostrophe; iOS labels that
+ * button `Don’t Allow` with U+2019, and the companion's substring match is
+ * exact, so the lookup fails on a button that is plainly on screen. The same
+ * goes for the quotes iOS puts around app names in permission dialogs, its en
+ * and em dashes, and the non-breaking spaces that appear in laid-out text.
  *
- * Two backends, cheap one first. The default backend walks the tree Apple's
- * translator exposes, and that tree is missing whole subtrees: a tab bar, nav
- * bar or toolbar comes back as a container with no children, so every control
- * inside one is unfindable even though it carries the label being searched for
- * and hit-tests fine. AXBridge walks the app's real view hierarchy instead and
- * does find them.
+ * Case is deliberately preserved: matching is documented as case-sensitive, and
+ * this is meant to erase typography, not to widen what matches.
+ */
+function normaliseForMatch(text: string): string {
+  return text
+    .replace(/[‘’‛ʼ]/g, "'")
+    .replace(/[“”‟]/g, '"')
+    .replace(/[‐-―−]/g, "-")
+    .replace(/[    ]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** The text a caller could plausibly be naming this element by. */
+function matchableText(element: AXElement): string[] {
+  const out: string[] = [];
+  for (const key of ["AXLabel", "AXValue"] as const) {
+    const value = element[key];
+    if (typeof value === "string" && value.trim()) out.push(value);
+  }
+  return out;
+}
+
+/**
+ * Resolves a single element by the text a caller knows it by.
  *
- * AXBridge is not the default because it is ~20x slower — 15ms against 300ms
- * on a warm read — which is not worth paying on the lookups that already work.
- * A miss costs both (~340ms), and a miss is exactly where the old answer was
- * wrong, so that is the right place to spend it.
+ * Cheap path first: the companion matches a marker server-side and returns just
+ * that element, roughly half a kilobyte against several for a whole tree, in
+ * ~13ms. Most lookups end there.
+ *
+ * When it misses, the fallback reads the screen and matches here. That covers
+ * three separate failures the marker query cannot:
+ *
+ *  - Apple's translator omits whole containers, so a control in a tab bar, nav
+ *    bar or toolbar is absent from the tree the marker query searches even
+ *    though it carries the label and hit-tests fine. `describeScreen` reads the
+ *    app's real view hierarchy instead.
+ *  - The match is on `AXLabel` only, but a control's visible text is not always
+ *    its label — search fields in particular have a null label and their text
+ *    in `AXValue`, making them unnameable.
+ *  - The match is exact, so a caller's ASCII apostrophe never finds iOS's
+ *    typographic one.
+ *
+ * One fallback rather than a chain of marker retries: it is a single round trip
+ * (~350ms against ~300ms for another marker query), and matching here means the
+ * comparison is ours to fix rather than the companion's to be exact about.
+ *
+ * Label matches beat value matches, so naming a control by its label does not
+ * lose to some other element that happens to contain the same text.
  */
 async function findByLabel(
   udid: string,
   label: string
 ): Promise<AXElement | null> {
-  return companions.withClient(udid, async (client) => {
-    const query = async (backend?: Backend): Promise<AXElement | null> => {
+  const marker = await companions.withClient(udid, async (client) => {
+    try {
       const found = (await client.accessibilityInfo({
         marker: label,
         matchKey: SearchableKey.LABEL,
-        backend,
+        keys: DESCRIBE_KEYS,
       })) as { elements?: AXElement } | null;
       const element = found?.elements;
       if (!element) return null;
 
-      // The match arrives with its whole subtree attached. On the home screen
-      // that is nothing, but a match inside an app can drag ten kilobytes of
-      // descendants along with it — which would defeat the point of asking for
-      // one element. Callers wanting structure have ui_describe_all.
-      const { children, ...withoutSubtree } = element;
-      return withoutSubtree as AXElement;
-    };
-
-    try {
-      const hit = await query();
-      if (hit) return hit;
+      // `canonicalise` also drops the subtree the match arrives with. On the
+      // home screen that is nothing, but a match inside an app can drag ten
+      // kilobytes of descendants along with it, which would defeat the point of
+      // asking for one element. Callers wanting structure have ui_describe_all.
+      return canonicalise(element);
     } catch (error) {
-      if (!/found no element/i.test((error as Error).message)) throw error;
-    }
-
-    try {
-      return await query(Backend.AXBRIDGE);
-    } catch (error) {
-      // Any AXBridge failure means "still not found", never a thrown error.
-      // A companion older than the one this server pins cannot start the
-      // backend at all and fails with an unrelated message about resolving the
-      // frontmost pid; surfacing that in place of "no element found" would
-      // send the caller chasing an accessibility misconfiguration instead of a
-      // label that genuinely is not on screen.
-      return null;
+      // "found no element" is how the companion reports an empty result, and is
+      // not a failure. Anything else is.
+      if (/found no element/i.test((error as Error).message)) return null;
+      throw error;
     }
   });
+  if (marker) return marker;
+
+  let tree: AXElement[];
+  try {
+    tree = await describeScreen(udid);
+  } catch {
+    // The fallback is best-effort: if the screen cannot be read, the honest
+    // answer is still "not found" rather than an error about a backend the
+    // caller did not ask for.
+    return null;
+  }
+
+  const needle = normaliseForMatch(label);
+  const labelHits: AXElement[] = [];
+  const valueHits: AXElement[] = [];
+
+  const visit = (element: AXElement) => {
+    const [elementLabel, elementValue] = [
+      element.AXLabel,
+      element.AXValue,
+    ].map((v) => (typeof v === "string" ? normaliseForMatch(v) : ""));
+
+    if (elementLabel && elementLabel.includes(needle)) labelHits.push(element);
+    else if (elementValue && elementValue.includes(needle)) valueHits.push(element);
+
+    for (const child of element.children ?? []) visit(child);
+  };
+  tree.forEach(visit);
+
+  const hit = labelHits[0] ?? valueHits[0];
+  return hit ? canonicalise(hit) : null;
 }
 
 /** The centre of an element's frame, in the tree's logical coordinate space. */
@@ -332,19 +401,27 @@ function centreOf(element: AXElement): { x: number; y: number } | null {
  * client only asked for NESTED when given --nested, which describe-point never
  * passed. Asking for NESTED here returns the element's whole subtree instead of
  * the single element callers expect.
+ *
+ * Same key set as every other read, so one element looks the same however a
+ * caller arrived at it. Left to the companion's defaults, the backends disagree
+ * about their own output: the AX backend calls a tab `role: "AXRadioButton"`
+ * with populated `traits`, and axbridge calls the same element `role: "Button"`
+ * with `traits: null`. Asking for the fields both agree on retires the problem
+ * rather than papering over it, and `type` carries what `role` was for.
  */
 async function describePoint(
   udid: string,
   x: number,
   y: number
 ): Promise<AXElement> {
-  return companions.withClient(
-    udid,
-    async (client) =>
+  return companions.withClient(udid, async (client) =>
+    canonicalise(
       (await client.accessibilityInfo({
         point: { x: Math.round(x), y: Math.round(y) },
         format: Format.LEGACY,
+        keys: DESCRIBE_KEYS,
       })) as AXElement
+    )
   );
 }
 
@@ -751,7 +828,8 @@ const SERVER_INSTRUCTIONS =
   "iOS Simulator MCP server. Every tool takes an `id` identifying your session, which owns one simulator. " +
   "Choose a distinctive id for yourself (e.g. \"qa-login-flow\", not \"test\") and reuse it for every call — other agents may be driving their own simulators on this same server, and sharing an id means taking over each other's. Calling start_simulator again with the same id resumes your existing simulator. Call destroy_simulator when finished.\n" +
   "Do not use `xcrun simctl`, `idb`, or other shell commands to control simulators; this server owns their lifecycle and cannot see changes made behind its back.\n" +
-  "Navigation: if you know what you want, tap it by name — ui_tap {label} resolves the element on the simulator and taps its centre, costing a few hundred bytes and no coordinate handling. ui_find {label} locates an element, or reports it absent as a normal answer. Only use ui_describe_all when you do not know what is on screen: it returns the whole tree and is several kilobytes. Labels match by case-sensitive substring.\n" +
+  "Navigation: if you know what you want, tap it by name — ui_tap {label} resolves the element on the simulator and taps its centre, costing a few hundred bytes and no coordinate handling. ui_find {label} locates an element, or reports it absent as a normal answer. Only use ui_describe_all when you do not know what is on screen: it returns the whole tree and is several kilobytes. Labels match by case-sensitive substring, against an element's label or its visible text, and curly quotes, apostrophes and dashes are treated as their plain equivalents — ask for what you see on screen.\n" +
+  "start_simulator does not return until the simulator answers, so you can use it immediately; it says so if it gave up waiting.\n" +
   "ui_describe_all reads the app's real view hierarchy, so it includes controls in tab bars, nav bars and toolbars, and is pruned to elements you can act on. It and a failed ui_find each cost ~300ms, so do not poll either in a tight loop.\n" +
   "Coordinates are logical screen space. ui_describe_all frames feed directly into ui_tap, ui_swipe and ui_describe_point.\n" +
   "Visual checks: if asked whether something looks right — layout, colour, alignment, anything about appearance — call ui_view and look at the screenshot. The accessibility tree shows what exists, not how it renders; an element can be present and correctly labelled while looking completely wrong. Do not derive tap coordinates from a screenshot: those are pixel space and stop matching logical space once the device is rotated.";
@@ -778,6 +856,29 @@ function errorWithTroubleshooting(message: string): string {
   return `${message}\n\nFor help, see the ${troubleshootingLink()}`;
 }
 
+/**
+ * Rewrites idb errors whose text describes a cause they are not usually about.
+ *
+ * `No translation object` is raised for any read the accessibility bridge cannot
+ * serve, and its wording blames coordinates and a fullscreen dialog. The
+ * overwhelmingly common cause is neither: the simulator is still coming up.
+ * Callers who take the message at face value go looking for a dialog that is not
+ * there, which is a documented way to lose an afternoon.
+ */
+function clarify(message: string): string {
+  if (/no translation object/i.test(message)) {
+    return (
+      "The simulator is not answering accessibility requests. It is usually " +
+      "still booting — wait a few seconds and try again; a fresh simulator can " +
+      "take up to 90 seconds. If it persists well after boot, the accessibility " +
+      "tree is wedged: call ui_describe_all, which restarts the companion and " +
+      "retries.\n\n" +
+      `Original error: ${message}`
+    );
+  }
+  return message;
+}
+
 async function handleToolError(
   errorPrefix: string,
   fn: () => Promise<any>
@@ -787,9 +888,60 @@ async function handleToolError(
   } catch (error) {
     return {
       isError: true as const,
-      content: [{ type: "text" as const, text: errorWithTroubleshooting(`${errorPrefix}: ${toError(error).message}`) }],
+      content: [{ type: "text" as const, text: errorWithTroubleshooting(`${errorPrefix}: ${clarify(toError(error).message)}`) }],
     };
   }
+}
+
+/**
+ * How long to wait for a new simulator to start answering accessibility reads.
+ * Observed 40-90s on an M-series Mac for a freshly created device; the bound is
+ * generous because timing out here is worse than waiting.
+ */
+const BOOT_READY_TIMEOUT_MS = 180_000;
+
+/**
+ * Resolves once the simulator can actually be driven, or when the wait runs out.
+ *
+ * `simctl boot` returning, and the device reporting "Booted", both happen well
+ * before the accessibility bridge will answer anything — a gap of a minute or
+ * more. Reporting success at that point hands the caller a simulator where every
+ * UI tool fails, with an error that blames a fullscreen dialog.
+ *
+ * The probe is an accessibility read rather than `describe`, because that is
+ * what the tools actually need: `describe` answers from target metadata and
+ * starts succeeding while the bridge is still silent, so it would report ready
+ * too early. A zero-sized root frame counts as not ready for the same reason.
+ *
+ * Returns whether it became ready, rather than throwing: the simulator exists
+ * either way, and the session is already registered, so a timeout is something
+ * to report rather than a failure to create.
+ */
+async function waitUntilDriveable(
+  udid: string,
+  timeoutMs: number = BOOT_READY_TIMEOUT_MS
+): Promise<{ ready: boolean; waitedMs: number }> {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    try {
+      const frame = await companions.withClient(udid, async (client) => {
+        const info = (await client.accessibilityInfo({
+          format: Format.NESTED,
+        })) as AXElement[] | AXElement | null;
+        if (info == null) return null;
+        const root = Array.isArray(info) ? info[0] : info;
+        return root?.frame ?? null;
+      });
+      if (frame && frame.width && frame.height) {
+        return { ready: true, waitedMs: Date.now() - started };
+      }
+    } catch {
+      // Every failure here is expected while booting; the deadline is the only
+      // thing that ends this loop early.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+  return { ready: false, waitedMs: Date.now() - started };
 }
 
 // --- Tool registrations ---
@@ -885,12 +1037,23 @@ if (!isToolFiltered("start_simulator")) {
             screenDims: null,
           });
 
+          // Do not return until the simulator can actually be driven. `simctl
+          // boot` completes a minute or more before the accessibility bridge
+          // answers, and a caller that trusts this tool's success will spend
+          // that minute collecting errors that blame a fullscreen dialog.
+          const { ready, waitedMs } = await waitUntilDriveable(udid);
+          const seconds = Math.round(waitedMs / 1000);
+
           return {
             isError: false,
             content: [
               {
                 type: "text",
-                text: `Simulator started: "${deviceName}" (${deviceType.name}, ${udid})`,
+                text: ready
+                  ? `Simulator started: "${deviceName}" (${deviceType.name}, ${udid}). Ready after ${seconds}s.`
+                  : `Simulator created and booting: "${deviceName}" (${deviceType.name}, ${udid}). ` +
+                    `It has not answered an accessibility read after ${seconds}s, which is longer than a simulator ` +
+                    `normally takes. It may still come up — poll ui_view until it returns a screenshot.`,
               },
             ],
           };
@@ -989,12 +1152,21 @@ if (!isToolFiltered("attach_simulator")) {
           screenDims: null,
         });
 
+        // "Booted" is reported well before the accessibility bridge answers, so
+        // attaching to a simulator that has only just come up has the same
+        // problem as creating one. Costs nothing when it is already up.
+        const { ready, waitedMs } = await waitUntilDriveable(udid);
+        const seconds = Math.round(waitedMs / 1000);
+
         return {
           isError: false,
           content: [
             {
               type: "text",
-              text: `Attached to simulator: "${found.name}" (${udid})`,
+              text: ready
+                ? `Attached to simulator: "${found.name}" (${udid})`
+                : `Attached to simulator: "${found.name}" (${udid}), but it has not answered an ` +
+                  `accessibility read after ${seconds}s. Poll ui_view until it returns a screenshot.`,
             },
           ],
         };

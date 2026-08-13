@@ -256,6 +256,21 @@ never declared as a dependency — in the repository it resolved through
   - The general lesson is broader than dependencies, and it is the same one as #47: the tests that would have caught this cost seconds, and the manual verification that did not catch it cost an afternoon of simulator boots.
 - [ ] **#52** Nothing verifies the repository state on push — no test job, no build check on PRs. The build only runs as a side effect of publishing (`prepare`) and of the companion workflow. A `tsc --noEmit` plus the packed-install smoke test on every push would be cheap and would have caught #51 before a tag existed.
 
+## 2.0.2 — done 2026-08-13
+
+- [x] **#18/#19 boot race.** `start_simulator` now polls an accessibility read until the simulator answers before returning, and says how long it waited. Verified: 33s wait, then `ui_view` succeeded on the first call with no wait of the caller's own. `attach_simulator` does the same, since "Booted" is reported well before the bridge answers. The `No translation object` error is rewritten to say the simulator is probably still booting, instead of blaming a fullscreen dialog.
+- [x] **#38 typography.** `normaliseForMatch` folds curly quotes, apostrophes, dashes and non-breaking spaces before comparing. Verified: `ui_tap {label: "Don't Allow"}` with an ASCII apostrophe now taps iOS's `Don’t Allow`.
+- [x] **#23 AXValue.** The fallback matches an element's visible text as well as its label, so search fields — null label, text in `AXValue` — are nameable. **Implemented but not verified**: no value-only element was on the test screen. Contacts' search field is the known case; worth a targeted run.
+- [x] **#45 one shape everywhere.** `canonicalise` reduces every element to the same six fields, client-side. Necessary because `keys` is honoured for point and whole-screen reads but **ignored for marker queries** — `ui_find` returned 16 fields where `ui_describe_point` returned 6, for the same element. Verified: both now draw from one set.
+
+## 2.0.3 candidates
+
+- [ ] **#26 rotation tool — investigate the naming disconnect first.** `HIDOrientation` is in the proto with all four orientations, wired into the `HIDEvent` oneof, and already in our generated client, so the tool itself is small. What is not settled is what the names mean.
+  - Simulator's **Device > Rotate Left** produced `detect_rotation` → **`landscape_left`** in today's testing. UIKit names interface orientations for where the device's top edge points, not for the direction of rotation, so "rotate left" conventionally yields `UIInterfaceOrientationLandscapeRight`. If that holds, our reported name is inverted relative to Apple's.
+  - This has to be resolved *before* a rotate tool exists, not after: once `rotate(landscape_left)` and `detect_rotation` are both shipped, any disagreement between them becomes a compatibility problem rather than a bug fix. Establish ground truth by rotating each way and reading the interface orientation the app itself reports, then decide whether to match Apple's names or keep ours and document the difference.
+  - `transformPointToPortrait` also keys off these names, so a rename is not cosmetic.
+- [ ] **#53 Label lookups are nondeterministic while a system modal is up.** In the 2.0.2 verification, `ui_find "Continue"` and `ui_tap "Continue"` disagreed six times running, back to back, on the same screen — one finding the element, the other reporting it absent. Both call `findByLabel`, so this is not a code divergence: the likeliest cause is AXBridge's frontmost resolution flipping between the alert's process and the app beneath it, so consecutive reads genuinely see different trees. Related to #37 and #46. Matters because dismissing permission dialogs is one of the most common things an agent does.
+
 ## Verified working
 
 - [x] **Landscape coordinate transformation is correct.** With the device rotated left, `detect_rotation` returned `landscape_left`, and coordinates taken from landscape space tapped their intended targets: Library tab at (87.5, 360) switched to Library, Collections tab at (192.5, 360) switched back, and the nav bar `...` at (751, 46) opened the overflow menu. Round-tripped, so not a coincidence of an already-selected tab.
