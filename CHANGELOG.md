@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.1
 
 ### Fixed: a client in a container could not connect
 
