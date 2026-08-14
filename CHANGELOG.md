@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+No behaviour change: the tool surface, its parameters and its output are
+identical.
+
+The pure logic — accessibility tree pruning, label matching, coordinate
+transforms — moved out of `src/index.ts` into `src/ax/` and gained unit tests
+(`npm test`, 62 assertions, well under a second). It could not be tested where
+it was, because `src/index.ts` starts a server on import. These rules were
+previously verified by booting simulators, at roughly three minutes an attempt.
+
+One duplicate implementation went with it: orientation detection had its own
+copy of the logical→portrait rotation arithmetic, separate from the one taps and
+swipes use. It now calls the same function, so the two cannot drift apart.
+
+CI and the publish workflow both run the tests.
+
 ## 2.0.3
 
 Recovers a simulator whose accessibility service never starts, and stops

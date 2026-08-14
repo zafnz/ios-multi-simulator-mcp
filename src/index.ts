@@ -12,6 +12,23 @@ import fs from "fs";
 import http from "http";
 import { companions } from "./idb/companionManager";
 import { Backend, Format, SearchableKey } from "./idb/client";
+import {
+  AXElement,
+  DESCRIBE_KEYS,
+  canonicalise,
+  centreOf,
+  collectProbeCandidates,
+  isDegenerateTree,
+  matchInTree,
+  pruneTree,
+  uniquelyLabelled,
+} from "./ax/tree";
+import {
+  Orientation,
+  candidateOrientations,
+  getEffectiveOrientation,
+  transformPointToPortrait,
+} from "./ax/orientation";
 
 const execFileAsync = promisify(execFile);
 
@@ -51,25 +68,6 @@ if (process.env.IOS_SIMULATOR_MCP_IDB_PATH) {
   );
 }
 
-/** An accessibility element as the companion reports it. */
-type AXElement = {
-  frame?: { x: number; y: number; width: number; height: number };
-  AXLabel?: string | null;
-  children?: AXElement[];
-  [key: string]: unknown;
-};
-
-/**
- * True when the read carried no usable tree: either a 0x0 root, or no document
- * at all (the companion serializes an empty read as JSON `null`).
- */
-function isDegenerateTree(elements: AXElement[]): boolean {
-  const root = elements[0];
-  if (!root) return true;
-  const frame = root.frame;
-  return !!frame && !frame.width && !frame.height;
-}
-
 /**
  * The accessibility tree for the whole screen, in the same nested shape the
  * `idb` CLI used to print.
@@ -95,137 +93,6 @@ async function describeAll(udid: string): Promise<AXElement[]> {
 
   await companions.shutdown(udid);
   return read();
-}
-
-/**
- * The keys a rich screen read asks for.
- *
- * Deliberately not the companion's default set, which is both wider and
- * narrower than callers need. `frame` is the dictionary form and is what this
- * server computes with everywhere; `AXFrame` is the same rectangle rendered as
- * a string, so asking for both would pay twice for one fact. `AXValue` earns
- * its place because a control's visible text is not always its label — search
- * fields in particular come back with a null `AXLabel` and their text in
- * `AXValue`, and would be unidentifiable without it.
- *
- * Left out: `pid`, `help`, `title`, `subrole`, `content_required`,
- * `custom_actions`, `role_description` and `traits`. They are near-constant or
- * near-null across a screen, and this payload is read by a model on every call.
- */
-const DESCRIBE_KEYS = [
-  "AXLabel",
-  "frame",
-  "AXValue",
-  "AXUniqueId",
-  "type",
-  "enabled",
-];
-
-/**
- * Reduces an element to the one shape every tool returns.
- *
- * Enforced here rather than by asking the companion, because asking does not
- * work everywhere: `keys` is honoured for point and whole-screen reads and
- * ignored for marker queries, so `ui_find` came back with sixteen fields where
- * `ui_describe_point` came back with six, for the same element. The backends
- * also disagree with each other — the AX backend calls a tab
- * `role: "AXRadioButton"` with populated `traits`, axbridge calls it
- * `role: "Button"` with `traits: null` — so a caller keying off those fields saw
- * different data depending on which path answered. Picking the fields they agree
- * on, in one place, retires both problems; `type` carries what `role` was for.
- *
- * Null and empty values are dropped: a screen's worth of `"AXValue": null` is
- * noise, and their absence is as informative as their emptiness.
- */
-function canonicalise(element: AXElement): AXElement {
-  const out: AXElement = {};
-  for (const key of DESCRIBE_KEYS) {
-    const value = element[key];
-    if (value === null || value === undefined || value === "") continue;
-    out[key] = value;
-  }
-  return out;
-}
-
-/** Roles that are worth reporting even with no label or identifier. */
-const ACTIONABLE_TYPES = new Set([
-  "Button",
-  "Cell",
-  "CheckBox",
-  "ComboBox",
-  "Link",
-  "PopUpButton",
-  "RadioButton",
-  "ScrollBar",
-  "SearchField",
-  "SecureTextField",
-  "Slider",
-  "Stepper",
-  "Switch",
-  "TabButton",
-  "TextArea",
-  "TextField",
-]);
-
-/**
- * Types that mean nothing on their own — the boxes a layout is built out of.
- * A named one is still worth keeping; it is an anonymous one that is noise.
- */
-const CONTAINER_TYPES = new Set(["Any", "Group", "Other", "Unknown"]);
-
-/** An element a caller could plausibly act on or reason about. */
-function isInteresting(element: AXElement): boolean {
-  const label = element.AXLabel;
-  if (typeof label === "string" && label.trim()) return true;
-  const value = element.AXValue;
-  if (typeof value === "string" && value.trim()) return true;
-
-  const type = String(element.type);
-  if (ACTIONABLE_TYPES.has(type)) return true;
-
-  // An identifier alone does not make an element worth reporting: UIKit gives
-  // its internal layout groups identifiers too, and on a photo grid that is a
-  // five-deep chain of anonymous `PX*-Group` nodes between the scroll view and
-  // the images. Keep an identified element only where its type says it is a
-  // real thing rather than a box.
-  const id = element.AXUniqueId;
-  return typeof id === "string" && !!id && !CONTAINER_TYPES.has(type);
-}
-
-/**
- * Drops the structural scaffolding from a tree, keeping what a caller can act
- * on. A dropped node's kept descendants are hoisted to its nearest kept
- * ancestor, so pruning never orphans a control — it only shortens the path to
- * it.
- *
- * This exists because the filter belongs on the companion and is not reachable
- * from here: idb has exactly this rule as
- * `FBAccessibilityElementFilter.interactable`, but the gRPC surface never sets
- * it, so every read arrives unfiltered. Doing it client-side costs a tree walk
- * we have already paid to receive, and saves the model reading the half of the
- * tree that is anonymous group containers.
- *
- * Each kept node is reduced to the shape every tool returns; see `canonicalise`.
- */
-function pruneTree(elements: AXElement[]): AXElement[] {
-  const visit = (element: AXElement): AXElement[] => {
-    const kept = (element.children ?? []).flatMap(visit);
-
-    if (!isInteresting(element)) return kept;
-
-    const out = canonicalise(element);
-    if (kept.length) out.children = kept;
-    return [out];
-  };
-
-  // The root is the screen itself and carries the frame callers measure
-  // against, so it is kept whether or not it is interesting in its own right.
-  return elements.flatMap((root) => {
-    const children = (root.children ?? []).flatMap(visit);
-    const out = canonicalise(root);
-    if (children.length) out.children = children;
-    return [out];
-  });
 }
 
 /**
@@ -264,38 +131,6 @@ async function describeScreen(udid: string): Promise<AXElement[]> {
   });
 
   return pruneTree(elements);
-}
-
-/**
- * Folds away the differences between what a caller types and what iOS renders.
- *
- * A caller asking for "Don't Allow" types an ASCII apostrophe; iOS labels that
- * button `Don’t Allow` with U+2019, and the companion's substring match is
- * exact, so the lookup fails on a button that is plainly on screen. The same
- * goes for the quotes iOS puts around app names in permission dialogs, its en
- * and em dashes, and the non-breaking spaces that appear in laid-out text.
- *
- * Case is deliberately preserved: matching is documented as case-sensitive, and
- * this is meant to erase typography, not to widen what matches.
- */
-function normaliseForMatch(text: string): string {
-  return text
-    .replace(/[‘’‛ʼ]/g, "'")
-    .replace(/[“”‟]/g, '"')
-    .replace(/[‐-―−]/g, "-")
-    .replace(/[    ]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-/** The text a caller could plausibly be naming this element by. */
-function matchableText(element: AXElement): string[] {
-  const out: string[] = [];
-  for (const key of ["AXLabel", "AXValue"] as const) {
-    const value = element[key];
-    if (typeof value === "string" && value.trim()) out.push(value);
-  }
-  return out;
 }
 
 /**
@@ -363,35 +198,7 @@ async function findByLabel(
     return null;
   }
 
-  const needle = normaliseForMatch(label);
-  const labelHits: AXElement[] = [];
-  const valueHits: AXElement[] = [];
-
-  const visit = (element: AXElement) => {
-    const [elementLabel, elementValue] = [
-      element.AXLabel,
-      element.AXValue,
-    ].map((v) => (typeof v === "string" ? normaliseForMatch(v) : ""));
-
-    if (elementLabel && elementLabel.includes(needle)) labelHits.push(element);
-    else if (elementValue && elementValue.includes(needle)) valueHits.push(element);
-
-    for (const child of element.children ?? []) visit(child);
-  };
-  tree.forEach(visit);
-
-  const hit = labelHits[0] ?? valueHits[0];
-  return hit ? canonicalise(hit) : null;
-}
-
-/** The centre of an element's frame, in the tree's logical coordinate space. */
-function centreOf(element: AXElement): { x: number; y: number } | null {
-  const frame = element.frame;
-  if (!frame || (!frame.width && !frame.height)) return null;
-  return {
-    x: frame.x + frame.width / 2,
-    y: frame.y + frame.height / 2,
-  };
+  return matchInTree(tree, label);
 }
 
 /**
@@ -437,13 +244,6 @@ function isToolFiltered(toolName: string): boolean {
 }
 
 // --- Simulator lifecycle management ---
-
-type Orientation =
-  | "auto"
-  | "portrait"
-  | "landscape_right"
-  | "upside_down"
-  | "landscape_left";
 
 type SimSession = { udid: string; name: string; owned: boolean; orientation: Orientation; screenDims: { width: number; height: number } | null };
 
@@ -571,58 +371,6 @@ async function cleanupAllSimulators(): Promise<void> {
 
 // --- Coordinate transformation ---
 
-interface Frame {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}
-
-/**
- * Determines the effective orientation for a session given the screen dimensions.
- * Uses the cached detected orientation if available, otherwise falls back to
- * simple width/height comparison (which can't distinguish landscape_right from
- * landscape_left, or portrait from upside_down).
- */
-function getEffectiveOrientation(
-  orientation: Orientation,
-  screenWidth: number,
-  screenHeight: number
-): Orientation {
-  if (orientation !== "auto") return orientation;
-  return screenWidth > screenHeight ? "landscape_right" : "portrait";
-}
-
-/**
- * Collects all labeled, non-full-screen elements from the accessibility tree.
- */
-function collectProbeCandidates(
-  els: any[],
-  screenW: number,
-  screenH: number
-): { frame: Frame; label: string }[] {
-  const results: { frame: Frame; label: string }[] = [];
-  for (const el of els) {
-    if (el.frame && el.frame.width && el.frame.height && el.AXLabel) {
-      // Skip full-screen elements
-      if (
-        !(
-          el.frame.x === 0 &&
-          el.frame.y === 0 &&
-          el.frame.width === screenW &&
-          el.frame.height === screenH
-        )
-      ) {
-        results.push({ frame: el.frame, label: el.AXLabel });
-      }
-    }
-    if (el.children && Array.isArray(el.children)) {
-      results.push(...collectProbeCandidates(el.children, screenW, screenH));
-    }
-  }
-  return results;
-}
-
 /**
  * Probes the simulator to auto-detect the exact rotation by cross-referencing
  * describe_all (rotated logical coords) with describe_point (portrait coord input).
@@ -630,8 +378,8 @@ function collectProbeCandidates(
  * Algorithm:
  * 1. Collect all labeled elements from describe_all
  * 2. Filter to elements with unique labels (avoid ambiguous matches)
- * 3. For each candidate element, compute its portrait-space center under both
- *    possible orientations, then call describe_point at each position
+ * 3. For each candidate element, transform its centre into portrait space under
+ *    both possible orientations, then call describe_point at each position
  * 4. If the element is found at exactly one position, that's our orientation
  * 5. If found at both or neither, try the next element
  *
@@ -647,63 +395,32 @@ async function detectOrientation(udid: string): Promise<Orientation> {
 
     const screenW: number = rootFrame.width;
     const screenH: number = rootFrame.height;
-    const isLandscape = screenW > screenH;
+    const candidates = candidateOrientations(screenW > screenH);
 
-    // Collect all candidate elements and filter to unique labels
-    const allCandidates = collectProbeCandidates(elements, screenW, screenH);
-    const labelCounts = new Map<string, number>();
-    for (const c of allCandidates) {
-      labelCounts.set(c.label, (labelCounts.get(c.label) || 0) + 1);
-    }
-    const uniqueCandidates = allCandidates.filter(
-      (c) => labelCounts.get(c.label) === 1
+    const probes = uniquelyLabelled(
+      collectProbeCandidates(elements, screenW, screenH)
     );
 
-    // Try each unique element as a probe
-    for (const probe of uniqueCandidates) {
-      const centerX = probe.frame.x + probe.frame.width / 2;
-      const centerY = probe.frame.y + probe.frame.height / 2;
+    for (const probe of probes) {
+      const centre = centreOf({ frame: probe.frame });
+      if (!centre) continue;
 
-      // Compute portrait-space coordinates for each candidate orientation
-      const orientations: { orientation: Orientation; x: number; y: number }[] =
-        isLandscape
-          ? [
-              {
-                orientation: "landscape_right",
-                x: centerY,
-                y: screenW - centerX,
-              },
-              {
-                orientation: "landscape_left",
-                x: screenH - centerY,
-                y: centerX,
-              },
-            ]
-          : [
-              {
-                orientation: "portrait",
-                x: centerX,
-                y: centerY,
-              },
-              {
-                orientation: "upside_down",
-                x: screenW - centerX,
-                y: screenH - centerY,
-              },
-            ];
-
-      // Probe both positions
       const matches: Orientation[] = [];
-      for (const candidate of orientations) {
+      for (const orientation of candidates) {
+        // Where this element would be in the portrait space describe_point
+        // accepts, if the screen were in this orientation. Deliberately the
+        // same transform tap and swipe use, so detection cannot drift from the
+        // behaviour it is detecting for.
+        const point = transformPointToPortrait(
+          centre.x,
+          centre.y,
+          orientation,
+          screenW,
+          screenH
+        );
         try {
-          const pointElement = await describePoint(
-            udid,
-            candidate.x,
-            candidate.y
-          );
-          if (pointElement.AXLabel === probe.label) {
-            matches.push(candidate.orientation);
-          }
+          const pointElement = await describePoint(udid, point.x, point.y);
+          if (pointElement.AXLabel === probe.label) matches.push(orientation);
         } catch {
           // probe failed, skip this position
         }
@@ -716,35 +433,11 @@ async function detectOrientation(udid: string): Promise<Orientation> {
       // Both or neither matched — ambiguous, try next element
     }
 
-    // Fallback if no element gave a definitive answer
-    return isLandscape ? "landscape_right" : "portrait";
+    // No element settled it, so the shape of the screen is all we know.
+    return candidates[0];
   } catch {
     // Detection is best-effort; degrade gracefully
     return "portrait";
-  }
-}
-
-/**
- * Transforms a logical-space point (x, y) to portrait space for companion input.
- * screenW/screenH are the logical dimensions from describe_all (e.g. 1376x1032 for landscape).
- */
-function transformPointToPortrait(
-  x: number,
-  y: number,
-  orientation: Orientation,
-  screenW: number,
-  screenH: number
-): { x: number; y: number } {
-  switch (orientation) {
-    case "portrait":
-    case "auto":
-      return { x, y };
-    case "landscape_right":
-      return { x: y, y: screenW - x };
-    case "landscape_left":
-      return { x: screenH - y, y: x };
-    case "upside_down":
-      return { x: screenW - x, y: screenH - y };
   }
 }
 

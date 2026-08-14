@@ -1,0 +1,14 @@
+// Type-checks the tests along with the source. Separate from tsconfig.json
+// because the two want different things: the build emits `src` into `build`,
+// while the tests are never compiled at all -- `node --test` strips their types
+// and runs the TypeScript directly, which is why they may import a `.ts` path.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    // Nothing is emitted here, so the build's `src` root does not apply.
+    "rootDir": "."
+  },
+  "include": ["src/**/*", "test/**/*"]
+}

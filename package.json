@@ -25,7 +25,8 @@
     "watch": "tsc --watch",
     "predev": "npm run build",
     "dev": "npx @modelcontextprotocol/inspector node build/index.js",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json",
+    "test": "node --test \"test/*.test.mts\"",
     "smoke": "bash scripts/smoke-packed.sh"
   },
   "keywords": [

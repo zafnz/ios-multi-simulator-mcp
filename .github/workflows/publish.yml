@@ -23,6 +23,9 @@ jobs:
           registry-url: "https://registry.npmjs.org"
       - run: npm ci
 
+      - name: Unit tests
+        run: npm test
+
       # Install the package the way a user does and start it, because the
       # repository is not a realistic environment: devDependencies are present
       # there, so a runtime import that is only a transitive devDependency

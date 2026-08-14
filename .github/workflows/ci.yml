@@ -24,6 +24,12 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      # The pure logic -- pruning rules, label matching, coordinate transforms.
+      # No simulator, no companion: the whole suite is under a second, against
+      # the several minutes a simulator boot costs to check the same rules.
+      - name: Unit tests
+        run: npm test
+
       # The check that 2.0.0 needed and did not have.
       - name: Smoke test the packed package
         run: npm run smoke

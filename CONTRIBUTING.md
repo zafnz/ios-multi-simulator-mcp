@@ -9,7 +9,7 @@ This project is **intentionally simple** and follows these core principles:
 
 ### Simplicity First
 
-- **Single file architecture**: All logic is contained in `src/index.ts` to simplify bundling and maintenance
+- **Single file architecture**: The server and every tool live in `src/index.ts`, to simplify bundling and maintenance. Two narrow exceptions: `src/idb/` (the generated gRPC client and companion process lifecycle) and `src/ax/` (pure tree and coordinate logic, split out so it can be unit tested — see [CLAUDE.md](CLAUDE.md#architecture))
 - **Minimal dependencies**: We keep dependencies minimal to ensure fast installs and small footprint on user machines
 - **Standard tooling**: We use `npm` (universally available) and `tsc` (simple, already available) for building
 
@@ -217,7 +217,7 @@ In such cases, document the deviation and reasoning in the pull request.
 
 - Follow the existing TypeScript patterns in the codebase
 - Use the existing error handling patterns with `toError()` and `errorWithTroubleshooting()`
-- Maintain the single-file architecture - all logic stays in `src/index.ts`
+- Maintain the single-file architecture - server logic and tools stay in `src/index.ts`. Pure logic that could be unit tested belongs in `src/ax/`, which must stay free of dependencies on simulators, companions and the filesystem
 
 ### Adding New Tools
 
@@ -255,7 +255,23 @@ For more security context, see the command injection resources in [CONTEXT.md](C
 
 ## Testing Requirements
 
-Due to the nature of this project, **manual testing is required** for all changes:
+### Unit tests
+
+The pure logic in `src/ax/` — pruning rules, label matching, coordinate
+transforms — is unit tested:
+
+```bash
+npm test
+```
+
+No simulator, no build step, well under a second. Run it on every change, and
+extend it whenever you change a rule in `src/ax/`. It needs Node ≥ 22.6, which
+runs the TypeScript directly; the published package still supports Node 18.
+
+### Manual testing
+
+Everything else still needs a real simulator, so **manual testing is required**
+for all changes:
 
 ### Why Manual Testing?
 

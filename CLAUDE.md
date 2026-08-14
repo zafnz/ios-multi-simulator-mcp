@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is the iOS Simulator MCP (Model Context Protocol) server - a tool that enables AI assistants to interact with iOS simulators through MCP. The project follows an **intentionally simple** single-file architecture where all logic is contained in `src/index.ts`.
+This is the iOS Simulator MCP (Model Context Protocol) server - a tool that enables AI assistants to interact with iOS simulators through MCP. The project follows an **intentionally simple** single-file architecture: the server and every tool live in `src/index.ts`, with two narrow exceptions described under Architecture.
 
 ## Build and Development Commands
 
@@ -18,6 +18,12 @@ npm run build
 # Development with automatic rebuild on changes
 npm run watch
 
+# Unit tests for the pure logic in src/ax/ (no simulator, well under a second)
+npm test
+
+# Type-check the source and the tests
+npm run typecheck
+
 # Run the MCP inspector for testing
 npm run dev
 
@@ -28,9 +34,28 @@ npm start
 ## Architecture
 
 The MCP surface — every tool, all validation, all session state — lives in
-`src/index.ts`, deliberately as one file. The only module split is the idb
-client under `src/idb/`, because it is generated code plus process lifecycle
-rather than server logic:
+`src/index.ts`, deliberately as one file. There are exactly two module splits,
+each for a reason that does not generalise.
+
+`src/ax/` is the pure logic, split out so it can be tested. `src/index.ts`
+starts a server on import, so nothing in it can be loaded by a test; these rules
+are the ones that are wrong in ways a type checker cannot see, and checking them
+against a device costs a simulator boot apiece:
+
+- `src/ax/tree.ts` — the accessibility tree as data: `canonicalise`,
+  `isInteresting`/`pruneTree`, `normaliseForMatch`/`matchInTree`, `centreOf`,
+  the probe-candidate helpers.
+- `src/ax/orientation.ts` — `transformPointToPortrait` and the orientation
+  vocabulary. This is the code that decides where a tap lands.
+
+Both are deliberately dependency-free, including on each other and on anything
+else in this repository. That is what lets `npm test` run the TypeScript
+directly under `node --test` with nothing to build first, and it is the property
+to preserve: anything needing a companion, a simulator or the filesystem belongs
+in `src/index.ts`, not here.
+
+`src/idb/` is the idb client, because it is generated code plus process
+lifecycle rather than server logic:
 
 - `src/idb/generated/idb.ts` — ts-proto output from `proto/idb.proto`,
   regenerated with `npm run gen:proto`. Never edit by hand.
@@ -79,7 +104,16 @@ The server provides these tools (can be filtered via environment variables):
 
 ## Testing
 
-This project requires **manual testing** on macOS with:
+Two layers, and they answer different questions.
+
+**`npm test`** — `node --test` over `test/*.test.mts`, covering the pure logic in
+`src/ax/`. No simulator, no companion, no build step; the whole suite is well
+under a second. Run it on every change and add to it whenever a rule in
+`src/ax/` changes. Node ≥ 22.6 is required to run the TypeScript directly (the
+published package still supports Node 18; this is a development-only floor).
+
+**Manual testing**, which is the only way to answer whether the server actually
+drives a simulator. Requires macOS with:
 - Xcode and iOS simulators installed
 - `idb_companion` installed (`brew install idb-companion`). No Python needed.
 - An MCP client (like Cursor) configured to use the server
@@ -92,14 +126,21 @@ Test changes by:
 4. Running `TESTING_SERVER.md` as well when touching transports, sessions or process
    lifecycle — it covers the things a single-simulator run cannot
 
+CI (`.github/workflows/ci.yml`) runs the typecheck, the unit tests and a
+packed-install smoke test on every push. None of them needs a simulator, so none
+of them replaces the manual plans above.
+
 ## Important Design Principles
 
 - **Keep it simple**: minimal dependencies, standard tooling (npm/tsc)
 - **Real use cases only**: Don't add hypothetical features
 - **Security first**: Always use `--` separator for user inputs, validate with Zod
 - **No architecture changes** without discussion — tools and server logic stay in
-  the single `src/index.ts`. `src/idb/` is the one deliberate exception, added
-  when the Python `idb` CLI was replaced by a direct gRPC client.
+  the single `src/index.ts`. There are two deliberate exceptions, both narrow:
+  `src/idb/`, added when the Python `idb` CLI was replaced by a direct gRPC
+  client, and `src/ax/`, added so the pure logic could be unit tested. Neither is
+  a licence to keep splitting: the 16 tool registrations in particular stay
+  together, because they are repetitive and benefit from being read side by side.
 - **Stay out of the user's idb**: we never read, write or enumerate `/tmp/idb`,
   which brew's companion and the Python client share. Our sockets live in
   `/tmp/imsm-<uid>/` and we only ever signal a process we spawned.
