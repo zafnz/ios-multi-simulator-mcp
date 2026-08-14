@@ -1,111 +1,117 @@
 # Quality Assurance
 
-This guide contains manual quality assurance tests to make sure all the tools in this MCP server is functional on release.
+Release checks for the things **[TESTING.md](TESTING.md) does not cover**: transports, multiple sessions on one server, and process lifecycle.
 
-You can run a test case copy and pasting the test case into a chat in an MCP client (like Cursor) that can run MCP tools.
+TESTING.md exercises every tool against a single simulator. Nothing here repeats that — if a tool misbehaves, this guide will not be what catches it.
 
-## Test Case: Photos app
+These cases need two MCP clients and a terminal, so they are run by hand.
 
-**Note:** This test case was written using iOS 17.2 and the native Photos app. It may need to be adjusted for other iOS versions or Photos app changes.
+---
 
-1. Call `start_simulator` to create and boot a new simulator, with an appropriate `id`.
-2. Wait 30 seconds for boot, then use `ui_view` and `ui_tap` to open the Photos app.
-3. Call `record_video` to start recording a screen recording of the test.
-4. Call `ui_describe_all` to make sure we are on the All Photos tab.
-5. Call `ui_describe_point` to find the x and y coordinates for tapping the Search tab button.
-6. Call `ui_tap` to tap the Search tab button.
-7. Call `ui_tap` to focus on the Search text input.
-8. Call `ui_type` to type "Photos" into the Search text input.
-9. Call `ui_describe_all` to describe the page and find the first photo result.
-10. Call `ui_describe_point` to find the x and y coordinates for the first photo result touchable area.
-11. Call `ui_tap` to tap the coordinates of the first photo result touchable area
-12. Call `ui_swipe` to swipe from the center of the screen down to dismiss the photo and go back to the All Photos tab.
-13. Call `ui_describe_all` to describe the page and see we are the All Photos tab.
-14. Call `screenshot` to take a screenshot of the current page.
-15. Call `ui_view` to view the current page.
-16. Call `stop_recording` to stop the screen recording.
+## Setup: a shared server
 
-## Multi-Agent / HTTP Transport Test Cases
+HTTP is the default transport, so a plain start is a shared server:
 
-These tests validate the shared-server HTTP transport, which lets multiple
-agents each drive their own simulator against one long-lived server, and lets an
-agent disconnect and later resume using the same session `id`.
+```bash
+node build/index.js --port 8008
+```
 
-### Setup: start the shared server
+**Expected:** logs `iOS Simulator MCP server listening on http://127.0.0.1:8008/mcp`.
 
-1. In a terminal, start one long-lived server in HTTP mode:
+Point clients at it as a remote server — **not** the `command`/`args` stdio form:
+
+```json
+{
+  "mcpServers": {
+    "ios-multi-simulator": {
+      "type": "http",
+      "url": "http://127.0.0.1:8008/mcp"
+    }
+  }
+}
+```
+
+---
+
+## Two agents, two simulators, one server
+
+The reason this fork exists. Needs two separate MCP client windows against the **same** server.
+
+1. In client A: `start_simulator` with `id: "agent-a"`, `type: "iPhone"`.
+2. In client B: `start_simulator` with `id: "agent-b"`, `type: "iPad"`.
+
+   **Expected:** a different simulator — different UDID, iPad rather than iPhone. Two simulator windows are open.
+3. In A: `ui_describe_all` with `id: "agent-a"`. In B: the same with `id: "agent-b"`.
+
+   **Expected:** each describes its own device. Neither disturbs the other.
+4. In A: `ui_describe_all` with `id: "agent-b"`.
+
+   **Expected:** it works. Sessions are not isolated from each other — one server, shared state. This is current behaviour, not a bug; see the security note in the README.
+5. In each client: `destroy_simulator` with its own `id`.
+
+   **Expected:** each simulator shuts down and is deleted independently.
+
+## Disconnect and resume
+
+An agent that dies mid-task should be able to pick its simulator back up.
+
+1. In a client: `start_simulator` with `id: "resume-test"`. Note the UDID. Then `launch_app` to put it somewhere recognisable.
+2. Fully quit the client. **Leave the server running.**
+3. Reopen the client, or start a different one, pointed at the same URL.
+4. `start_simulator` again with the same `id: "resume-test"`.
+
+   **Expected:** `Resumed existing simulator for session "resume-test": ...`, with the **same UDID**. A new simulator here is a failure.
+5. `ui_describe_all` with `id: "resume-test"`.
+
+   **Expected:** the app from step 1 is still open.
+6. `destroy_simulator` to clean up.
+
+## Transport selection
+
+1. **Default is HTTP:**
+
    ```bash
-   node build/index.js --http --port 8008
-   ```
-   Confirm it logs `iOS Simulator MCP server listening on http://127.0.0.1:8008/mcp`.
-2. Point one or more MCP clients at it as a remote server (do **not** use the
-   `command`/`args` stdio form):
-   ```json
-   {
-     "mcpServers": {
-       "ios-multi-simulator": {
-         "type": "http",
-         "url": "http://127.0.0.1:8008/mcp"
-       }
-     }
-   }
+   node build/index.js
    ```
 
-### Test Case: Two agents, two simulators, one server
+   **Expected:** logs a listening URL.
+2. **`--stdio` selects stdio:**
 
-Run these two clients against the **same** server started above. Use two
-separate MCP client windows/instances (e.g. two Cursor windows or two Claude
-sessions).
+   ```bash
+   node build/index.js --stdio
+   ```
 
-1. In client A, call `start_simulator` with `id: "agent-a"` and `type: "iPhone"`.
-   Confirm it returns `Simulator started: ...`.
-2. In client B, call `start_simulator` with `id: "agent-b"` and `type: "iPad"`.
-   Confirm it returns a **different** simulator (different UDID, iPad device).
-3. Confirm two separate simulator windows are open.
-4. In client A, call `ui_describe_all` with `id: "agent-a"` and confirm it
-   describes the iPhone. In client B, call `ui_describe_all` with `id: "agent-b"`
-   and confirm it describes the iPad. The two must not interfere.
-5. In client A, call `ui_describe_all` with `id: "agent-b"` — confirm A can also
-   reach B's session (state is shared in the one server). *(This shared access is
-   expected; there is no isolation between sessions yet — see the security note
-   in the README.)*
-6. In each client, call `destroy_simulator` with its own `id`. Confirm each
-   simulator is shut down and deleted independently.
+   **Expected:** no listening line; the process speaks MCP on stdin/stdout. A client configured with the `command`/`args` form drives it, and `start_simulator`, `ui_describe_all` and `destroy_simulator` all behave as they do over HTTP.
+3. **A flag beats the environment**, both ways:
 
-### Test Case: Disconnect and reconnect (resume)
+   ```bash
+   IOS_SIMULATOR_MCP_TRANSPORT=stdio node build/index.js --http --port 8009
+   IOS_SIMULATOR_MCP_TRANSPORT=http  node build/index.js --stdio
+   ```
 
-1. Start the shared server in HTTP mode (see Setup).
-2. In a client, call `start_simulator` with `id: "resume-test"`. Note the UDID
-   returned. Navigate somewhere non-default (e.g. open an app with `launch_app`).
-3. Fully quit/close the MCP client (simulating an agent terminating). Leave the
-   **server** running.
-4. Reopen the client (or start a fresh one) pointed at the same server URL.
-5. Call `start_simulator` again with the **same** `id: "resume-test"`. Confirm it
-   returns `Resumed existing simulator for session "resume-test": ...` with the
-   **same UDID** as step 2 — it must not create a new simulator.
-6. Call `ui_describe_all` with `id: "resume-test"` and confirm the app/state from
-   step 2 is still there.
-7. Call `destroy_simulator` to clean up.
+   **Expected:** HTTP for the first, stdio for the second.
+4. **Port is taken from `--port`, then `IOS_SIMULATOR_MCP_HTTP_PORT`, then 8008.**
 
-### Test Case: Config precedence and cleanup-on-exit
+## Cleanup on exit
 
-1. **CLI flag wins over env var:** run
-   `IOS_SIMULATOR_MCP_TRANSPORT=stdio node build/index.js --http --port 8009`.
-   Confirm it starts in **HTTP** mode (logs the listening URL) despite the env
-   var saying stdio.
-2. **Cleanup on exit (default):** with a server running in HTTP mode, call
-   `start_simulator` with `id: "cleanup-test"`. Stop the server with Ctrl-C.
-   Confirm the owned simulator is shut down and deleted (check `xcrun simctl
-   list devices` — it should be gone).
-3. **Cleanup disabled:** run
-   `IOS_SIMULATOR_MCP_CLEANUP_ON_EXIT=false node build/index.js --http`, call
-   `start_simulator` with `id: "keep-test"`, then stop the server with Ctrl-C.
-   Confirm the simulator is **still present and booted** (`xcrun simctl list
-   devices`). Manually delete it afterwards with `xcrun simctl delete <udid>`.
+Simulators the server created are its responsibility; ones it merely attached to are not.
 
-### Test Case: stdio mode still works (backward compatibility)
+1. With a server running, `start_simulator` with `id: "cleanup-test"`, then stop the server with Ctrl-C.
 
-1. Configure a client with the original stdio form (`command` / `args`, no
-   `--http` flag and no `IOS_SIMULATOR_MCP_TRANSPORT` env var).
-2. Call `start_simulator`, `ui_describe_all`, and `destroy_simulator` and confirm
-   they all work exactly as before.
+   **Expected:** the simulator is shut down and deleted — gone from `xcrun simctl list devices`.
+2. Repeat with cleanup disabled:
+
+   ```bash
+   IOS_SIMULATOR_MCP_CLEANUP_ON_EXIT=false node build/index.js
+   ```
+
+   **Expected:** after Ctrl-C the simulator is **still present and booted**. Delete it by hand afterwards.
+3. Attach to a simulator the server did not create (`attach_simulator`), then stop the server.
+
+   **Expected:** that simulator survives, whatever the cleanup setting. The server only deletes what it owns.
+
+## Port already in use
+
+1. With a server running on 8008, start a second one on the same port.
+
+   **Expected:** it exits with a message naming the port and suggesting `--port`, rather than a raw `EADDRINUSE` stack trace.

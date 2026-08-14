@@ -87,7 +87,10 @@ This project requires **manual testing** on macOS with:
 Test changes by:
 1. Building with `npm run build`
 2. Configuring your MCP client to point to `build/index.js`
-3. Running through the test cases in `QA.md`
+3. Running through `TESTING.md`, which exercises every tool against the
+   `testapp/` fixture (build it with `testapp/build.sh` first)
+4. Running `QA.md` as well when touching transports, sessions or process
+   lifecycle — it covers the things a single-simulator run cannot
 
 ## Important Design Principles
 
@@ -107,7 +110,9 @@ For more detailed information, refer to these documentation files:
 
 - **[README.md](README.md)** - Complete project documentation including installation instructions, available tools, configuration options, and usage examples
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** - Contribution guidelines, development setup, dependency management, and the project's philosophy of intentional simplicity
-- **[QA.md](QA.md)** - Manual quality assurance test cases for validating functionality
+- **[TESTING.md](TESTING.md)** - Step-by-step manual test plan covering every tool, run against the `testapp/` fixture
+- **[QA.md](QA.md)** - Release checks for transports, multiple sessions on one server, and process lifecycle
+- **[BOOT_BUG.md](BOOT_BUG.md)** - The accessibility-never-starts wedge: what was ruled out, what was not, and the recovery in place
 - **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)** - Common issues and their solutions, including IDB installation help
 - **[SECURITY.md](SECURITY.md)** - Security policy and information about fixed vulnerabilities
 - **[CONTEXT.md](CONTEXT.md)** - Reference links for MCP documentation, iOS simulator commands, IDB commands, and security best practices

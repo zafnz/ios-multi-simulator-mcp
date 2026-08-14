@@ -191,7 +191,7 @@ npm ls --depth=0
 
 4. **Verify compatibility**:
    - Test all existing functionality
-   - Run through the test cases in [QA.md](QA.md)
+   - Run through [TESTING.md](TESTING.md), and [QA.md](QA.md) if transports or sessions are affected
    - Ensure no new TypeScript errors
 
 ### Why This Matters
@@ -296,7 +296,7 @@ Due to the nature of this project, **manual testing is required** for all change
    - Test all affected functionality
    - Test error conditions
    - Verify the tool works as expected with AI agents
-   - Consider running the test cases in [QA.md](QA.md) to ensure existing functionality still works
+   - Consider running [TESTING.md](TESTING.md) to ensure existing functionality still works, and [QA.md](QA.md) for transport or session changes
 
 ### Required Documentation for Contributions
 
