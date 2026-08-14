@@ -171,5 +171,5 @@ issue](https://github.com/zafnz/ios-multi-simulator-mcp/issues).
 
 ## 4. Still Stuck?
 - Check the [README](./README.md) for setup and usage instructions.
-- If the problem persists, [open an issue](https://github.com/joshuayoes/ios-simulator-mcp/issues) and include the error message and steps to reproduce.
+- If the problem persists, [open an issue](https://github.com/zafnz/ios-multi-simulator-mcp/issues) and include the error message and steps to reproduce.
 
