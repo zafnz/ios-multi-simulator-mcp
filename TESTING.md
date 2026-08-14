@@ -4,16 +4,9 @@ Step-by-step test plan that exercises every MCP tool. Run through the portrait s
 
 Session ID used throughout: `test-session`
 
-**Known issue — simulator boot time.** `start_simulator` returns success before the simulator is actually driveable. Until that is fixed, after any `start_simulator` you must poll `ui_view` until it stops erroring. Expect **40–90 seconds**, not the 10 seconds this guide previously claimed. While booting, every UI tool fails with a misleading message:
+**Boot time.** `start_simulator` does not return until the simulator is driveable, so no polling is needed between steps.
 
-```
-INTERNAL: No translation object returned for simulator. This means you have likely
-specified a point onscreen that is invalid or invisible due to a fullscreen dialog
-```
-
-That error does **not** mean your coordinates are wrong — it usually means the device is still booting.
-
-**Known issue — incomplete accessibility trees.** `ui_describe_all` sometimes returns containers with `"children": []` even though elements are plainly visible — the bottom `Toolbar` group is affected consistently, and freshly-presented views (such as search results) can come back with the entire content area empty. `ui_describe_point` still resolves those elements correctly. Where this guide says to locate something with `ui_describe_point` rather than `ui_describe_all`, that is why.
+**If a step fails with "not answering accessibility requests"**, that is the boot wedge, not the step under test. See [BOOT_BUG.md](BOOT_BUG.md).
 
 ---
 
@@ -25,9 +18,7 @@ That error does **not** mean your coordinates are wrong — it usually means the
 start_simulator(id: "test-session", type: "iPhone")
 ```
 
-**Expected:** Simulator is created and booted. Output includes device name, type, and UDID.
-
-Poll `ui_view(id: "test-session")` until it returns a screenshot instead of an error before continuing. See the boot-time note above.
+**Expected:** Simulator is created and driveable. Output includes device name, type, UDID, and how long it took to become ready. Continue straight to the next step.
 
 ### #2 ui_view — home screen
 
@@ -101,15 +92,15 @@ ui_view(id: "test-session")
 
 ### #9 ui_describe_point — locate the search text field
 
-Contacts has a search text field in the bottom toolbar. It will **not** appear in `ui_describe_all` (see the incomplete-tree note above), so locate it by point. Probe near the bottom centre of the screen:
+Contacts has a search text field in the bottom toolbar. Confirm `ui_describe_point` resolves it:
 
 ```
 ui_describe_point(id: "test-session", x: 170, y: 822)
 ```
 
-**Expected:** Returns `"type": "TextField"` with `"subrole": "AXSearchField"` and `"AXValue": "Search"`. Note its frame — e.g. `{{33, 803}, {276, 38}}` — and compute the centre for the next step.
+**Expected:** an element with `"AXValue": "Search"` and a non-zero frame spanning most of the toolbar's width. Note its centre for the next step.
 
-Note the field's `AXLabel` is `null`, so it cannot be tapped by label.
+The field carries its text in `AXValue` and has no `AXLabel`, so tap it by coordinate. `ui_find(label: "Search")` resolves the magnifying-glass icon instead, which is expected — labels are preferred over values.
 
 ### #10 ui_tap — tap the search field
 
@@ -159,7 +150,7 @@ record_video(id: "test-session")
 
 ### #15 ui_tap — do something while recording
 
-Tap the filtered contact to create activity in the recording. Note that at this point `ui_describe_all` may return an empty tree for the search-results view, and `ui_tap` by label will fail with "No element found" — use coordinates from `ui_describe_point`:
+Tap the filtered contact to create activity in the recording. Locate it by point first, then tap its row:
 
 ```
 ui_describe_point(id: "test-session", x: 100, y: 130)
@@ -178,7 +169,17 @@ stop_recording(id: "test-session")
 
 ### #17 install_app
 
-**Requires a fixture.** This repo does not ship a test `.app` bundle, so this step needs one supplied — either build any simple iOS app for the simulator, or point at an existing `.app` in your Xcode DerivedData. Record the path and bundle identifier before running.
+**Requires a fixture.** This repo ships no test `.app`, so supply one. Any simulator build will do — the quickest source is an existing one in Xcode's DerivedData:
+
+```
+ls -d ~/Library/Developer/Xcode/DerivedData/*/Build/Products/*-iphonesimulator/*.app
+```
+
+Read its bundle identifier for the next step:
+
+```
+/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" <path to .app>/Info.plist
+```
 
 ```
 install_app(id: "test-session", app_path: "<path to a .app bundle>")
@@ -222,7 +223,7 @@ Since step #20 deleted the sim (owned=true), create a new one to test attach:
 start_simulator(id: "owner-session", type: "iPhone")
 ```
 
-Poll `ui_view` until it succeeds, then note the UDID from the output.
+Note the UDID from the output.
 
 ```
 attach_simulator(id: "attach-test", udid: "<udid from owner-session>")
@@ -261,8 +262,6 @@ This section verifies that logical coordinates work correctly after device rotat
 ```
 start_simulator(id: "landscape-test", type: "iPhone")
 ```
-
-Poll `ui_view` until it succeeds before continuing.
 
 ### #24 Open Photos app
 
@@ -336,18 +335,19 @@ ui_view(id: "landscape-test")
 ui_describe_all(id: "landscape-test")
 ```
 
-**Expected:** Root frame has width > height — `874x402` instead of `402x874` on an iPhone 17 Pro. Elements have coordinates in logical landscape space.
+**Expected:** Root frame has width > height, the reverse of portrait. Elements have coordinates in logical landscape space.
 
-**The tab bar buttons will not be in this output.** The `Tab Bar` group at `{{0, 338}, {874, 64}}` comes back with `"children": []`, and `ui_find(id: "landscape-test", label: "Collections")` also reports "No element found" — even though the element does carry that exact label. Locate the two tabs by point instead:
+Locate the two tab bar buttons, either by name or by point:
 
 ```
+ui_find(id: "landscape-test", label: "Collections")
 ui_describe_point(id: "landscape-test", x: 100, y: 360)   → Library tab
 ui_describe_point(id: "landscape-test", x: 205, y: 360)   → Collections tab
 ```
 
-**Expected:** `AXRadioButton` / subrole `AXTabButton` elements with `AXUniqueId` `LibraryTab` and `CollectionsTab`, labels "Library" and "Collections", frames around `{{42, 342}, {91, 36}}` and `{{137, 342}, {111, 36}}`. The selected one has `AXValue: 1` and a `Selected` trait.
+**Expected:** elements labelled "Library" and "Collections", with `AXUniqueId` `LibraryTab` and `CollectionsTab` and frames in the lower-left of the landscape screen. The selected tab has `AXValue: 1`.
 
-Note which tab is currently selected — Photos usually opens on **Collections**, which matters for the next step.
+Note which tab is selected — that determines which one to tap first below.
 
 ### #30 ui_tap — tap element using logical coordinates
 
@@ -383,19 +383,17 @@ ui_view(id: "landscape-test")
 ui_describe_all(id: "landscape-test")
 ```
 
-**Expected:** The tree reflects Collections **content** — headings "Memories", "Pinned", "Albums", and buttons "Favorites", "Recently Saved", "Map", "Videos", "Screenshots", "Recently Deleted".
-
-Do **not** expect a "Collections" title element: the Nav bar group is childless and carries the string only as `AXUniqueId`, with `AXLabel: null`. The visible title is not represented as a labelled element.
+**Expected:** The tree reflects Collections **content** — headings such as "Memories", "Pinned" and "Albums", and the shelf buttons beneath them. `ui_find(id: "landscape-test", label: "Memories")` is a quicker way to assert the same thing.
 
 ### #33 Second coordinate test — tap the overflow menu
 
-The three dots (`...`) sit in the nav bar, which is also childless, so locate the button by point rather than from the #32 output:
+Locate the three dots (`...`) in the nav bar:
 
 ```
 ui_describe_point(id: "landscape-test", x: 750, y: 46)
 ```
 
-**Expected:** `AXPopUpButton` labelled **"View Options and Reorder"**, frame around `{{737, 28}, {28, 36}}`.
+**Expected:** a `PopUpButton` labelled **"View Options and Reorder"**.
 
 Tap its centre:
 
@@ -416,6 +414,68 @@ destroy_simulator(id: "landscape-test")
 
 ---
 
+## Part 3 — Round-trip timing
+
+Measures how long the **server** takes, with no model in the loop. Driving the
+tools through an agent measures the agent; this measures the tool.
+
+Needs the server in HTTP mode and a booted simulator in a session named `rtt`.
+Start one however you like, then:
+
+```bash
+call() {
+  curl -s -o /tmp/rtt-out.txt -w '%{time_total}' \
+    -X POST http://127.0.0.1:8008/mcp \
+    -H 'Content-Type: application/json' \
+    -H 'Accept: application/json, text/event-stream' \
+    -d "$1"
+}
+med() { sort -n | awk '{a[NR]=$1} END{printf "%.0f ms\n", a[int(NR/2)+1]*1000}'; }
+
+time_tool() {   # time_tool <name> <json args>
+  printf '%-24s ' "$1"
+  BODY="{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"$1\",\"arguments\":$2}}"
+  for _ in $(seq 6); do call "$BODY"; echo; done | med
+}
+```
+
+Then:
+
+```bash
+time_tool ui_tap            '{"id":"rtt","x":200,"y":400}'
+time_tool ui_describe_point '{"id":"rtt","x":200,"y":400}'
+time_tool ui_find           '{"id":"rtt","label":"Settings"}'
+time_tool ui_find           '{"id":"rtt","label":"ZZZnope"}'
+time_tool ui_describe_all   '{"id":"rtt"}'
+time_tool ui_view           '{"id":"rtt"}'
+```
+
+**Expected**, as medians on an M-series Mac. Exact numbers vary with the machine
+and what else is running; the **ratios** are what matter:
+
+| Call | Order of magnitude |
+|---|---|
+| `ui_tap` by coordinate | ~2 ms |
+| `ui_describe_point` | ~10 ms |
+| `ui_find`, name present in the cheap tree | ~25 ms |
+| `ui_find`, name absent — falls back | ~300 ms |
+| `ui_describe_all` | ~300 ms |
+| `ui_view` | ~350 ms |
+
+Two things to check rather than exact figures:
+
+- **`ui_tap` and `ui_describe_point` are single-digit milliseconds.** If they are
+  not, something is wrong with the companion connection, not with the tool.
+- **Anything reading the whole screen costs ~300 ms**, because it reads the app's
+  real view hierarchy. A `ui_find` that misses pays the same, since it falls back
+  to that read. This is the reason to tap by name rather than describing the
+  screen and picking coordinates.
+
+Discard the first call after a simulator starts — it includes connecting to the
+companion and runs an order of magnitude slower than the rest.
+
+---
+
 ## Result
 
 All tools tested:
@@ -427,7 +487,7 @@ All tools tested:
 | `attach_simulator` | #21 |
 | `detect_rotation` | #27 |
 | `ui_describe_all` | #3, #29, #32 |
-| `ui_find` | #6 |
+| `ui_find` | #6, #29, #32 |
 | `ui_tap` | #7, #10, #15, #24.5, #30, #33 |
 | `ui_type` | #11 |
 | `ui_swipe` | #5 |
