@@ -12,7 +12,7 @@ For transports, multiple sessions on one server and process lifecycle — none o
 
 Session ID used throughout: `test-session`
 
-Parts 1 and 2 use `testapp/`, a fixture built for this guide. It has no first-run wizards, and every control appears twice — once in the plain view hierarchy and once inside system chrome (nav bar, toolbar). The chrome copies are the interesting ones: their contents are absent from the default accessibility tree, so they exercise the paths that work around that. A status label reports each interaction, so a toolbar tap can be confirmed without reading the toolbar.
+Parts 1 and 2 use `testapp/`, a fixture built for this guide. It has no first-run wizards, and every control appears twice — once in the plain view hierarchy and once inside system chrome (nav bar, toolbar). The chrome copies are the interesting ones: their contents are absent from the default accessibility tree, so they exercise the paths that work around that. A status label reports each interaction, so a toolbar tap can be confirmed without reading the toolbar, and an orientation label reports what the app itself believes about rotation — the one fact no tool outside the app can observe.
 
 Build it first:
 
@@ -100,7 +100,7 @@ launch_app(id: "test-session", bundle_id: "com.example.mcptestapp")
 ui_view(id: "test-session")
 ```
 
-**Expected:** A screenshot showing a nav bar with **Nav Button**, a text field, **Plain Button**, a status label reading `status: ready`, and a bottom toolbar with **Toolbar Button** and a search field.
+**Expected:** A screenshot showing a nav bar with **Nav Button**, a text field, **Plain Button**, a status label reading `status: ready`, an orientation label reading `orientation: interface=portrait device=portrait`, and a bottom toolbar with **Toolbar Button** and a search field.
 
 ### #10 ui_describe_all — the whole tree, including system chrome
 
@@ -111,7 +111,7 @@ ui_describe_all(id: "test-session")
 **Expected:** All five controls are present, and — the point of this step — the `NavigationBar` and `Toolbar` groups **have children**:
 
 - `NavButton`, inside the nav bar
-- `PlainField`, `PlainButton`, `StatusLabel` in the plain hierarchy
+- `PlainField`, `PlainButton`, `StatusLabel`, `OrientationLabel` in the plain hierarchy
 - `ToolbarButton` and a text field, inside the toolbar
 
 A nav bar or toolbar coming back with no children means the tree has regressed to the incomplete read, and everything below will fail.
@@ -265,7 +265,17 @@ ui_describe_all(id: "landscape-test")
 detect_rotation(id: "landscape-test")
 ```
 
-**Expected:** `landscape_left` after a Rotate Left, or `landscape_right` if you rotated the other way.
+**Expected:** `landscape_left` after a Rotate Left, or `landscape_right` if you rotated the other way — the same words the Simulator's own menus use.
+
+Cross-check it against what the app itself believes:
+
+```
+ui_find(id: "landscape-test", label: "orientation:")
+```
+
+**Expected:** `orientation: interface=landscapeRight device=landscapeLeft` after a Rotate Left. The two disagree **by design** — `UIOrientation.h` defines `UIInterfaceOrientationLandscapeLeft` as `UIDeviceOrientationLandscapeRight` — and we report the orientation the *interface* is in, named in the *device* vocabulary. Do not read the mismatch as a fault; read a *match* between `device` and our answer, and a mirrored `interface`.
+
+Upside down is not testable here: a Face ID iPhone moves the device but never gives the app an upside-down interface, so `device=portraitUpsideDown` while the interface stays where it was. Use an iPad for that case.
 
 ### #28 ui_view — confirm landscape
 

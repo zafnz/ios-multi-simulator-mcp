@@ -283,10 +283,30 @@ never declared as a dependency — in the repository it resolved through
 
 ## 2.0.3 candidates
 
-- [ ] **#26 rotation tool — investigate the naming disconnect first.** `HIDOrientation` is in the proto with all four orientations, wired into the `HIDEvent` oneof, and already in our generated client, so the tool itself is small. What is not settled is what the names mean.
-  - Simulator's **Device > Rotate Left** produced `detect_rotation` → **`landscape_left`** in today's testing. UIKit names interface orientations for where the device's top edge points, not for the direction of rotation, so "rotate left" conventionally yields `UIInterfaceOrientationLandscapeRight`. If that holds, our reported name is inverted relative to Apple's.
-  - This has to be resolved *before* a rotate tool exists, not after: once `rotate(landscape_left)` and `detect_rotation` are both shipped, any disagreement between them becomes a compatibility problem rather than a bug fix. Establish ground truth by rotating each way and reading the interface orientation the app itself reports, then decide whether to match Apple's names or keep ours and document the difference.
-  - `transformPointToPortrait` also keys off these names, so a rename is not cosmetic.
+- [ ] **#26 rotation tool — naming settled 2026-08-14, tool not built.** `HIDOrientation` is in the proto with all four orientations, wired into the `HIDEvent` oneof, and already in our generated client, so the tool itself is small. The blocker was what the names mean, and that is now answered.
+  - **We match the Simulator's own vocabulary, in both of its menus.** Measured against a human driving the menu, with a tap by coordinate each time to prove the transform and not just the label:
+
+    | menu action | `detect_rotation` | tap from that tree |
+    |---|---|---|
+    | Device > Rotate Left | `landscape_left` | (776.5, 46) → `tapped Nav Button` |
+    | Device > Rotate Right ×2 | `landscape_right` | (162.5, 352) → `tapped Toolbar Button` |
+    | Device > Orientation > Landscape Left | `landscape_left` | (776.5, 46) → `tapped Nav Button` |
+    | Device > Orientation > Landscape Right | `landscape_right` | (162.5, 352) → `tapped Toolbar Button` |
+
+  - **The earlier "our name is inverted relative to Apple's" was comparing against the wrong enum.** Apple ships two, deliberately crossed, and says so in `UIOrientation.h` (iPhoneSimulator26.5 SDK): `UIDeviceOrientationLandscapeLeft` is "home button on the right", and *"Note that UIInterfaceOrientationLandscapeLeft is equal to UIDeviceOrientationLandscapeRight (and vice versa). This is because rotating the device to the left requires rotating the content to the right."* We use the **device** vocabulary, which is also what the Simulator's menus use. Nothing needs renaming.
+  - **Confirmed live**, not just from the header: `testapp` now displays both of the app's own answers (`OrientationLabel`), and they were read back at every position.
+
+    | app: `device` | app: `interface` | `detect_rotation` | tap from that tree |
+    |---|---|---|---|
+    | `portrait` | `portrait` | `portrait` | Plain Button ✓ |
+    | `landscapeLeft` | `landscapeRight` | `landscape_left` | Nav Button ✓ |
+    | `landscapeRight` | `landscapeLeft` | `landscape_right` | Toolbar Button ✓ |
+    | `portraitUpsideDown` | `landscapeRight` | `landscape_left` | Nav Button ✓ |
+
+  - **The exact rule, which the last row is the proof of: we report the orientation the *interface* is in, named in Apple's *device* vocabulary.** In that row the device is upside down while the interface is landscape, and we say `landscape_left` — following the interface, which is right, because the coordinate space follows the interface and not the device. Any `rotate` tool must say this plainly: our word names the interface, in the vocabulary the Simulator's menus use.
+  - **`upside_down` is unreachable on a Face ID iPhone.** `Device > Orientation > Portrait Upside Down` does move the device — the app reports `device=portraitUpsideDown` — but iOS never gives the app an upside-down interface, even after `UIInterfaceOrientationPortraitUpsideDown` was added to the fixture's `Info.plist` specifically to test this. The interface stays wherever it was (`landscapeRight` above; `portrait` after a relaunch). So a `rotate(upside_down)` on an iPhone would look broken while behaving correctly, and `detect_rotation` would keep reporting the interface. iPad is where that fourth case can actually be exercised — untested.
+  - **Both landscape trees are byte-identical in geometry** (root `874x402`, same frames) — the only thing distinguishing them is the probe. Worth remembering before anyone tries to infer orientation from the frame.
+  - `transformPointToPortrait` keys off these names, so this was worth settling before the tool existed rather than after.
 - [ ] **#53 Label lookups are nondeterministic while a system modal is up.** In the 2.0.2 verification, `ui_find "Continue"` and `ui_tap "Continue"` disagreed six times running, back to back, on the same screen — one finding the element, the other reporting it absent. Both call `findByLabel`, so this is not a code divergence: the likeliest cause is AXBridge's frontmost resolution flipping between the alert's process and the app beneath it, so consecutive reads genuinely see different trees. Related to #37 and #46. Matters because dismissing permission dialogs is one of the most common things an agent does.
 
 ## Verified working

@@ -16,10 +16,44 @@
 
 #import <UIKit/UIKit.h>
 
+#pragma mark - Orientation names
+
+// UIKit has two orientation vocabularies and they are deliberately crossed:
+// UIOrientation.h defines UIInterfaceOrientationLandscapeLeft as
+// UIDeviceOrientationLandscapeRight, "because rotating the device to the left
+// requires rotating the content to the right". Reporting both is the only way
+// to say which one a tool's own naming agrees with, and the two disagreeing is
+// the normal case rather than a fault. They also come apart for a second
+// reason: a device can be in an orientation the app does not adopt, which is
+// how a notched iPhone answers a request for upside-down portrait.
+
+static NSString *InterfaceOrientationName(UIInterfaceOrientation o) {
+  switch (o) {
+    case UIInterfaceOrientationPortrait: return @"portrait";
+    case UIInterfaceOrientationPortraitUpsideDown: return @"portraitUpsideDown";
+    case UIInterfaceOrientationLandscapeLeft: return @"landscapeLeft";
+    case UIInterfaceOrientationLandscapeRight: return @"landscapeRight";
+    default: return @"unknown";
+  }
+}
+
+static NSString *DeviceOrientationName(UIDeviceOrientation o) {
+  switch (o) {
+    case UIDeviceOrientationPortrait: return @"portrait";
+    case UIDeviceOrientationPortraitUpsideDown: return @"portraitUpsideDown";
+    case UIDeviceOrientationLandscapeLeft: return @"landscapeLeft";
+    case UIDeviceOrientationLandscapeRight: return @"landscapeRight";
+    case UIDeviceOrientationFaceUp: return @"faceUp";
+    case UIDeviceOrientationFaceDown: return @"faceDown";
+    default: return @"unknown";
+  }
+}
+
 #pragma mark - Root view controller
 
 @interface RootViewController : UIViewController <UITextFieldDelegate>
 @property(nonatomic, strong) UILabel *status;
+@property(nonatomic, strong) UILabel *orientation;
 @property(nonatomic, strong) UITextField *plainField;
 @property(nonatomic, strong) UITextField *toolbarField;
 @end
@@ -83,8 +117,28 @@
   self.status.numberOfLines = 0;
   self.status.accessibilityIdentifier = @"StatusLabel";
 
-  UIStackView *stack = [[UIStackView alloc]
-      initWithArrangedSubviews:@[ self.plainField, plainButton, self.status ]];
+  // What the app itself believes, which no tool outside it can observe. It is
+  // the only way to check a rotation tool's vocabulary against Apple's, and to
+  // tell "the device did not rotate" from "it rotated and the app declined".
+  self.orientation = [[UILabel alloc] init];
+  self.orientation.textAlignment = NSTextAlignmentCenter;
+  self.orientation.numberOfLines = 0;
+  self.orientation.font = [UIFont systemFontOfSize:13];
+  self.orientation.textColor = UIColor.secondaryLabelColor;
+  self.orientation.accessibilityIdentifier = @"OrientationLabel";
+
+  // The device notification fires even when the interface does not follow the
+  // device, which is exactly the case worth seeing.
+  [UIDevice.currentDevice beginGeneratingDeviceOrientationNotifications];
+  [NSNotificationCenter.defaultCenter
+      addObserver:self
+         selector:@selector(refreshOrientation)
+             name:UIDeviceOrientationDidChangeNotification
+           object:nil];
+
+  UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[
+    self.plainField, plainButton, self.status, self.orientation
+  ]];
   stack.axis = UILayoutConstraintAxisVertical;
   stack.spacing = 24;
   stack.translatesAutoresizingMaskIntoConstraints = NO;
@@ -96,6 +150,39 @@
     [stack.centerXAnchor constraintEqualToAnchor:safe.centerXAnchor],
     [stack.widthAnchor constraintEqualToConstant:280],
   ]];
+}
+
+- (void)viewDidAppear:(BOOL)animated {
+  [super viewDidAppear:animated];
+  // The window is not attached in viewDidLoad, and the interface orientation
+  // comes from its scene.
+  [self refreshOrientation];
+}
+
+- (void)viewWillTransitionToSize:(CGSize)size
+       withTransitionCoordinator:
+           (id<UIViewControllerTransitionCoordinator>)coordinator {
+  [super viewWillTransitionToSize:size withTransitionCoordinator:coordinator];
+  [coordinator
+      animateAlongsideTransition:nil
+                      completion:^(
+                          id<UIViewControllerTransitionCoordinatorContext> ctx) {
+                        [self refreshOrientation];
+                      }];
+}
+
+- (void)refreshOrientation {
+  UIInterfaceOrientation interface =
+      self.view.window.windowScene.interfaceOrientation;
+  self.orientation.text = [NSString
+      stringWithFormat:@"orientation: interface=%@ device=%@",
+                       InterfaceOrientationName(interface),
+                       DeviceOrientationName(UIDevice.currentDevice.orientation)];
+}
+
+- (void)dealloc {
+  [NSNotificationCenter.defaultCenter removeObserver:self];
+  [UIDevice.currentDevice endGeneratingDeviceOrientationNotifications];
 }
 
 - (UITextField *)fieldWithPlaceholder:(NSString *)placeholder
