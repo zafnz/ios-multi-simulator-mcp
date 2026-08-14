@@ -158,6 +158,7 @@ For more detailed information, refer to these documentation files:
 - **[TESTING_TOOLS.md](TESTING_TOOLS.md)** - Step-by-step manual test plan covering every tool, run against the `testapp/` fixture
 - **[TESTING_SERVER.md](TESTING_SERVER.md)** - Release checks for transports, multiple sessions on one server, and process lifecycle
 - **[BOOT_BUG.md](BOOT_BUG.md)** - The accessibility-never-starts wedge: what was ruled out, what was not, and the recovery in place
+- **[CAMERA.md](CAMERA.md)** - **Proposal, not implemented.** Feeding a static image to the simulator's camera: why the system-extension route is rejected, what a swizzled hook would cost, and what to test before starting
 - **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)** - Common issues and their solutions, including IDB installation help
 - **[SECURITY.md](SECURITY.md)** - Security policy and information about fixed vulnerabilities
 - **[CONTEXT.md](CONTEXT.md)** - Reference links for MCP documentation, iOS simulator commands, IDB commands, and security best practices
