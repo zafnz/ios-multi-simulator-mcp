@@ -1,8 +1,16 @@
 # Manual Testing Guide
 
-Step-by-step test plan that exercises every MCP tool. Run through the portrait section first, then the landscape coordinate verification section.
+Step-by-step test plan that exercises every MCP tool. Part 1 covers portrait, Part 2 verifies coordinates after rotation, Part 3 times the server.
 
 Session ID used throughout: `test-session`
+
+Parts 1 and 2 use `testapp/`, a fixture built for this guide. It has no first-run wizards, and every control appears twice — once in the plain view hierarchy and once inside system chrome (nav bar, toolbar). The chrome copies are the interesting ones: their contents are absent from the default accessibility tree, so they exercise the paths that work around that. A status label reports each interaction, so a toolbar tap can be confirmed without reading the toolbar.
+
+Build it first:
+
+```bash
+testapp/build.sh
+```
 
 **Boot time.** `start_simulator` does not return until the simulator is driveable, so no polling is needed between steps.
 
@@ -10,7 +18,7 @@ Session ID used throughout: `test-session`
 
 ---
 
-## Part 1 — Portrait Mode (all tools)
+## Part 1 — Portrait
 
 ### #1 start_simulator
 
@@ -26,7 +34,7 @@ start_simulator(id: "test-session", type: "iPhone")
 ui_view(id: "test-session")
 ```
 
-**Expected:** Returns a JPEG screenshot showing the iOS home screen with app icons.
+**Expected:** A screenshot of the iOS home screen.
 
 ### #3 ui_describe_all — accessibility tree
 
@@ -34,284 +42,214 @@ ui_view(id: "test-session")
 ui_describe_all(id: "test-session")
 ```
 
-**Expected:** Returns a JSON accessibility tree. The root element should have a non-zero `frame` (e.g. `{"x":0,"y":0,"width":402,"height":874}` on an iPhone 17 Pro — exact dimensions vary by device). Should contain child elements for app icons (e.g. "Settings", "Photos", "Safari").
+**Expected:** A JSON tree whose root has a non-zero frame matching the device's logical size. Contains the home screen's app icons, the dock and the status bar.
 
-### #4 ui_describe_point — query specific coordinates
+### #4 ui_describe_point — query a coordinate
 
-Using the coordinates of an app icon from step #3 (e.g. the center of the Settings icon):
+Using the centre of any app icon from step #3:
 
 ```
-ui_describe_point(id: "test-session", x: <settings_x>, y: <settings_y>)
+ui_describe_point(id: "test-session", x: <icon_x>, y: <icon_y>)
 ```
 
-**Expected:** Returns the accessibility element at that point, including `AXLabel` matching the app icon name (e.g. "Settings").
+**Expected:** The element at that point, with an `AXLabel` matching the icon's name.
 
 ### #5 ui_swipe — swipe to the second home screen page
-
-The first home screen page is full of apps with intrusive first-run wizards, so the test flow uses Contacts on page 2. This step doubles as the `ui_swipe` test.
 
 ```
 ui_swipe(id: "test-session", x_start: 350, y_start: 550, x_end: 50, y_end: 550, duration: "0.3")
 ```
 
-**Expected:** Output says "Swiped successfully".
+**Expected:** "Swiped successfully".
 
-### #6 ui_view + ui_find — verify page 2 and locate Contacts
-
-```
-ui_view(id: "test-session")
-```
-
-**Expected:** Screenshot shows the second home screen page — a different set of icons including **Contacts**, **Fitness**, **Watch**, **Files**. This confirms the swipe in #5 took effect.
-
-Then confirm `ui_find` locates the icon without fetching the whole tree:
-
-```
-ui_find(id: "test-session", label: "Contacts")
-```
-
-**Expected:** Returns a single element with `AXLabel` "Contacts" and a frame on the current page.
-
-### #7 ui_tap — open Contacts by label
-
-Tap by label rather than coordinates, to exercise label resolution:
-
-```
-ui_tap(id: "test-session", label: "Contacts")
-```
-
-**Expected:** Output says "Tapped successfully".
-
-### #8 ui_view — verify Contacts opened
+### #6 ui_view — verify the swipe
 
 ```
 ui_view(id: "test-session")
 ```
 
-**Expected:** Screenshot shows the Contacts app with the sample contact list (John Appleseed, Kate Bell, Anna Haro, Daniel Higgins Jr., David Taylor, Hank M. Zakroff). Contacts is used deliberately: it presents **no first-run wizards**.
+**Expected:** A different set of icons from step #2, confirming the page changed.
 
-### #9 ui_describe_point — locate the search text field
-
-Contacts has a search text field in the bottom toolbar. Confirm `ui_describe_point` resolves it:
+### #7 install_app
 
 ```
-ui_describe_point(id: "test-session", x: 170, y: 822)
+install_app(id: "test-session", app_path: "<repo>/testapp/build/MCPTestApp.app")
 ```
 
-**Expected:** an element with `"AXValue": "Search"` and a non-zero frame spanning most of the toolbar's width. Note its centre for the next step.
+**Expected:** "App installed successfully from: ...".
 
-The field carries its text in `AXValue` and has no `AXLabel`, so tap it by coordinate. `ui_find(label: "Search")` resolves the magnifying-glass icon instead, which is expected — labels are preferred over values.
-
-### #10 ui_tap — tap the search field
-
-Using the centre of the frame from step #9:
+### #8 launch_app
 
 ```
-ui_tap(id: "test-session", x: 171, y: 822)
+launch_app(id: "test-session", bundle_id: "com.example.mcptestapp")
 ```
 
-**Expected:** "Tapped successfully". The search field is focused.
+**Expected:** "App com.example.mcptestapp launched successfully".
 
-On a fresh simulator a first-run **QuickPath keyboard overlay** ("Speed up your typing by sliding your finger across the letters…") may cover the keyboard. It does not need dismissing — typing in the next step works anyway and clears it.
-
-### #11 ui_type — type text
-
-```
-ui_type(id: "test-session", text: "Kate")
-```
-
-**Expected:** Output says "Typed successfully".
-
-### #12 ui_view — verify typed text and filtering
+### #9 ui_view — verify the app rendered
 
 ```
 ui_view(id: "test-session")
 ```
 
-**Expected:** Screenshot shows "Kate" in the search field and a filtered result **"Kate Bell"** under a "Top Name Matches" heading.
+**Expected:** A screenshot showing a nav bar with **Nav Button**, a text field, **Plain Button**, a status label reading `status: ready`, and a bottom toolbar with **Toolbar Button** and a search field.
 
-Contacts search is used rather than Settings search because Settings search depends on a background index that is not built on a freshly-created simulator, and returns "No Results" for anything for the first several minutes.
+### #10 ui_describe_all — the whole tree, including system chrome
 
-### #13 screenshot — save to file
+```
+ui_describe_all(id: "test-session")
+```
+
+**Expected:** All five controls are present, and — the point of this step — the `NavigationBar` and `Toolbar` groups **have children**:
+
+- `NavButton`, inside the nav bar
+- `PlainField`, `PlainButton`, `StatusLabel` in the plain hierarchy
+- `ToolbarButton` and a text field, inside the toolbar
+
+A nav bar or toolbar coming back with no children means the tree has regressed to the incomplete read, and everything below will fail.
+
+### #11 ui_find — a control in the plain hierarchy
+
+```
+ui_find(id: "test-session", label: "Plain Button")
+```
+
+**Expected:** A single element with that label and a usable frame. This is the fast path.
+
+### #12 ui_find — a control inside the toolbar
+
+```
+ui_find(id: "test-session", label: "Toolbar Button")
+```
+
+**Expected:** The same shape of answer. This one is resolved by the fallback, so it takes noticeably longer than #11 — see Part 3.
+
+### #13 ui_tap — tap a toolbar control by name
+
+```
+ui_tap(id: "test-session", label: "Toolbar Button")
+ui_find(id: "test-session", label: "status:")
+```
+
+**Expected:** "Tapped successfully", then a status label reading `status: tapped Toolbar Button`. The status label lives in the plain hierarchy, so this confirms the toolbar tap without reading the toolbar.
+
+### #14 ui_tap — a control that has no label
+
+The toolbar's text field carries its visible text in `AXValue` and has no `AXLabel`:
+
+```
+ui_tap(id: "test-session", label: "Toolbar Search")
+```
+
+**Expected:** "Tapped successfully", and the field is focused. This is matching on value rather than label.
+
+### #15 ui_type — type into the focused field
+
+```
+ui_type(id: "test-session", text: "hello")
+ui_find(id: "test-session", label: "status:")
+```
+
+**Expected:** "Typed successfully", then `status: Toolbar Search = "hello"`.
+
+### #16 ui_describe_point — hit-test a chrome control
+
+Using the centre of the `Toolbar Button` frame from step #12:
+
+```
+ui_describe_point(id: "test-session", x: <x>, y: <y>)
+```
+
+**Expected:** The toolbar button. Point reads hit-test rather than walking the tree, so this is the control case when a name-based lookup disagrees.
+
+### #17 screenshot — save to file
 
 ```
 screenshot(id: "test-session", output_path: "/tmp/mcp-test-screenshot.png")
 ```
 
-**Expected:** Output includes "Wrote screenshot to". Verify the file exists at `/tmp/mcp-test-screenshot.png` and is a valid PNG. Note the file is in **physical pixels** (e.g. 1206x2622 for a 402x874 logical frame at 3x).
+**Expected:** "Wrote screenshot to". The file exists and is a valid PNG, in physical pixels — larger than the logical frame by the device's scale factor.
 
-### #14 record_video — start recording
+### #18 record_video — start recording
 
 ```
 record_video(id: "test-session")
 ```
 
-**Expected:** Output says recording started and gives the output file path (defaults to `~/Downloads/simulator_recording_<timestamp>.mp4` unless `IOS_SIMULATOR_MCP_DEFAULT_OUTPUT_DIR` is set).
+**Expected:** Recording started, with an output path (defaults under `~/Downloads` unless `IOS_SIMULATOR_MCP_DEFAULT_OUTPUT_DIR` is set).
 
-### #15 ui_tap — do something while recording
-
-Tap the filtered contact to create activity in the recording. Locate it by point first, then tap its row:
+### #19 ui_tap — activity while recording
 
 ```
-ui_describe_point(id: "test-session", x: 100, y: 130)
-ui_tap(id: "test-session", x: 194, y: 130)
+ui_tap(id: "test-session", label: "Plain Button")
+ui_tap(id: "test-session", label: "Nav Button")
 ```
 
-**Expected:** "Tapped successfully".
+**Expected:** Both succeed; the status label reports each in turn.
 
-### #16 stop_recording — stop and verify
+### #20 stop_recording
 
 ```
 stop_recording(id: "test-session")
 ```
 
-**Expected:** Output says "Recording stopped successfully." Verify the video file exists at the path given in step #14 and is non-trivial in size (several MB for a short recording).
+**Expected:** "Recording stopped successfully." The video file exists at the path from #18 and is several MB.
 
-### #17 install_app
-
-**Requires a fixture.** This repo ships no test `.app`, so supply one. Any simulator build will do — the quickest source is an existing one in Xcode's DerivedData:
-
-```
-ls -d ~/Library/Developer/Xcode/DerivedData/*/Build/Products/*-iphonesimulator/*.app
-```
-
-Read its bundle identifier for the next step:
-
-```
-/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" <path to .app>/Info.plist
-```
-
-```
-install_app(id: "test-session", app_path: "<path to a .app bundle>")
-```
-
-**Expected:** Output says "App installed successfully from: ...".
-
-Skip #17–#19 if no fixture is available; `launch_app` is still covered by step #24.
-
-### #18 launch_app
-
-```
-launch_app(id: "test-session", bundle_id: "<bundle id of installed app>")
-```
-
-**Expected:** Output says the app launched successfully — e.g. `App <bundle_id> launched successfully`. (The output does **not** include a PID.)
-
-### #19 ui_view — verify app launched
-
-```
-ui_view(id: "test-session")
-```
-
-**Expected:** Screenshot shows the installed app is running.
-
-### #20 destroy_simulator — destroy the owned session
-
-First note the UDID from step #1. Destroy the current session:
+### #21 destroy_simulator, then attach to a new one
 
 ```
 destroy_simulator(id: "test-session")
-```
-
-**Expected:** Output says "Simulator destroyed".
-
-### #21 attach_simulator — reattach
-
-Since step #20 deleted the sim (owned=true), create a new one to test attach:
-
-```
 start_simulator(id: "owner-session", type: "iPhone")
-```
-
-Note the UDID from the output.
-
-```
 attach_simulator(id: "attach-test", udid: "<udid from owner-session>")
 ```
 
-**Expected:** Output says "Attached to simulator: ...".
+**Expected:** "Simulator destroyed", then a new simulator, then "Attached to simulator: ...".
 
-### #22 Verify attached session works, then clean up
+### #22 Verify the attached session, then clean up
 
 ```
 ui_view(id: "attach-test")
-```
-
-**Expected:** Returns a screenshot from the same simulator.
-
-```
 destroy_simulator(id: "attach-test")
-```
-
-**Expected:** Output says "Detached from simulator" (not destroyed, since owned=false).
-
-```
 destroy_simulator(id: "owner-session")
 ```
 
-**Expected:** Output says "Simulator destroyed" (owned=true, actually deleted).
+**Expected:** A screenshot from the same simulator; then "Detached from simulator" for the attached session (owned=false), and "Simulator destroyed" for the owner (owned=true).
 
 ---
 
-## Part 2 — Landscape Coordinate Verification
+## Part 2 — Coordinates after rotation
 
-This section verifies that logical coordinates work correctly after device rotation. Uses the Photos app because it supports landscape orientation.
+Verifies that coordinates read in landscape are usable in landscape. Uses the same fixture, which supports both orientations.
 
-### #23 Start a fresh simulator
+### #23 Start a simulator and launch the fixture
 
 ```
 start_simulator(id: "landscape-test", type: "iPhone")
+install_app(id: "landscape-test", app_path: "<repo>/testapp/build/MCPTestApp.app")
+launch_app(id: "landscape-test", bundle_id: "com.example.mcptestapp")
 ```
 
-### #24 Open Photos app
-
-```
-launch_app(id: "landscape-test", bundle_id: "com.apple.mobileslideshow")
-```
-
-**Expected:** Output says `App com.apple.mobileslideshow launched successfully`.
-
-### #24.5 Dismiss the first-run wizards
-
-On a fresh simulator Photos opens into onboarding, not the library. There are **two** dialogs to clear, in order:
-
-1. A **"What's New in Photos"** screen — tap its **Continue** button.
-
-   ```
-   ui_tap(id: "landscape-test", label: "Continue")
-   ```
-
-2. A **notifications permission** prompt — tap **Don't Allow**.
-
-   ```
-   ui_tap(id: "landscape-test", label: "Don’t Allow")
-   ```
-
-   ⚠️ That apostrophe is **U+2019** (typographic), not an ASCII `'`. iOS labels the
-   button `Don’t Allow`, and `ui_tap` matches by exact substring, so an ASCII
-   apostrophe fails with "No element found". Match on `Allow` alone if in doubt —
-   but note it also substring-matches the **Allow** button, so prefer the full
-   curly-apostrophe string.
-
-**Expected:** Both taps report "Tapped successfully", and the Photos library is visible afterwards.
-
-If a tap by label fails, fall back to `ui_describe_point` to locate the button (see the incomplete-tree note at the top). Take a `ui_view` between the two taps if you need to confirm which dialog is showing — the order and exact wording vary between iOS versions.
-
-### #25 ui_view — verify Photos in portrait
+### #24 ui_view — confirm portrait
 
 ```
 ui_view(id: "landscape-test")
 ```
 
-**Expected:** Screenshot shows the Photos app **library content** in portrait orientation — not an onboarding or permission screen. If a wizard is still showing, step #24.5 did not complete.
+**Expected:** The fixture in portrait: nav bar at the top, toolbar at the bottom.
+
+### #25 ui_describe_all — note the portrait geometry
+
+```
+ui_describe_all(id: "landscape-test")
+```
+
+**Expected:** Root frame taller than it is wide. Note it, to compare after rotating.
 
 ### #26 Rotate to landscape
 
-**Manual step:** In the Simulator app, use the menu **Device > Rotate Left** (or Cmd+Left Arrow) to rotate the device.
+**Manual step:** In the Simulator app, use **Device > Rotate Left** (or Cmd+Left Arrow).
 
-Wait a few seconds for the UI to settle.
-
-> This step cannot be performed by an MCP client — no rotation tool is exposed, and driving the Simulator app directly is out of bounds. A human must do this, or Part 2 must be run manually.
+> No MCP client can perform this — no rotation tool is exposed. A human must do it, or Part 2 must be run by hand.
 
 ### #27 detect_rotation
 
@@ -319,90 +257,59 @@ Wait a few seconds for the UI to settle.
 detect_rotation(id: "landscape-test")
 ```
 
-**Expected:** Output says the detected orientation is `landscape_left`, matching the **Rotate Left** performed in step #26. (If you rotated the other way, expect `landscape_right`.)
+**Expected:** `landscape_left` after a Rotate Left, or `landscape_right` if you rotated the other way.
 
-### #28 ui_view — verify landscape screenshot
+### #28 ui_view — confirm landscape
 
 ```
 ui_view(id: "landscape-test")
 ```
 
-**Expected:** Screenshot is in landscape orientation showing the Photos app rotated.
+**Expected:** A landscape screenshot of the fixture.
 
-### #29 ui_describe_all — get landscape coordinates
+### #29 ui_describe_all — landscape geometry
 
 ```
 ui_describe_all(id: "landscape-test")
 ```
 
-**Expected:** Root frame has width > height, the reverse of portrait. Elements have coordinates in logical landscape space.
+**Expected:** Root frame now wider than tall, the reverse of #25. All five controls still present, with frames in landscape space. Note the centre of `Toolbar Button` and of `Nav Button`.
 
-Locate the two tab bar buttons, either by name or by point:
-
-```
-ui_find(id: "landscape-test", label: "Collections")
-ui_describe_point(id: "landscape-test", x: 100, y: 360)   → Library tab
-ui_describe_point(id: "landscape-test", x: 205, y: 360)   → Collections tab
-```
-
-**Expected:** elements labelled "Library" and "Collections", with `AXUniqueId` `LibraryTab` and `CollectionsTab` and frames in the lower-left of the landscape screen. The selected tab has `AXValue: 1`.
-
-Note which tab is selected — that determines which one to tap first below.
-
-### #30 ui_tap — tap element using logical coordinates
-
-Photos normally starts on Collections, so tapping Collections first would assert nothing — the screen would be unchanged whether or not the coordinate landed correctly. Switch **away** first, then back.
-
-Tap Library, using the centre of the Library frame from step #29:
+### #30 ui_tap — tap a toolbar control by landscape coordinate
 
 ```
-ui_tap(id: "landscape-test", x: 87.5, y: 360)
+ui_tap(id: "landscape-test", x: <toolbar_button_x>, y: <toolbar_button_y>)
+ui_find(id: "landscape-test", label: "status:")
 ```
 
-**Expected:** "Tapped successfully", and a following `ui_view` shows the **Library** view — a photo grid titled "Library" with a photo count. This is the real assertion of Part 2: a coordinate derived from a landscape accessibility tree hit the element it pointed at.
+**Expected:** `status: tapped Toolbar Button`. This is the real assertion of Part 2: a coordinate taken from a landscape tree hit the element it pointed at.
 
-Then tap Collections, using the centre of the Collections frame:
-
-```
-ui_tap(id: "landscape-test", x: 192.5, y: 360)
-```
-
-**Expected:** "Tapped successfully".
-
-### #31 ui_view — verify tap worked
+### #31 ui_view — see the result
 
 ```
 ui_view(id: "landscape-test")
 ```
 
-**Expected:** Screenshot shows the **Collections view, with "Collections" as the title** — Memories and Pinned shelves visible. Combined with the Library screenshot in #30, this confirms both taps landed on their intended tabs and the coordinate transformation round-trips.
+**Expected:** The status label on screen reflects the tap.
 
-### #32 ui_describe_all — verify state change
-
-```
-ui_describe_all(id: "landscape-test")
-```
-
-**Expected:** The tree reflects Collections **content** — headings such as "Memories", "Pinned" and "Albums", and the shelf buttons beneath them. `ui_find(id: "landscape-test", label: "Memories")` is a quicker way to assert the same thing.
-
-### #33 Second coordinate test — tap the overflow menu
-
-Locate the three dots (`...`) in the nav bar:
+### #32 ui_tap — a second control, elsewhere on screen
 
 ```
-ui_describe_point(id: "landscape-test", x: 750, y: 46)
+ui_tap(id: "landscape-test", x: <nav_button_x>, y: <nav_button_y>)
+ui_find(id: "landscape-test", label: "status:")
 ```
 
-**Expected:** a `PopUpButton` labelled **"View Options and Reorder"**.
+**Expected:** `status: tapped Nav Button`, confirming the transformation holds in a different region.
 
-Tap its centre:
+### #33 ui_type — type in landscape
 
 ```
-ui_tap(id: "landscape-test", x: 751, y: 46)
-ui_view(id: "landscape-test")
+ui_tap(id: "landscape-test", label: "Toolbar Search")
+ui_type(id: "landscape-test", text: "landscape")
+ui_find(id: "landscape-test", label: "status:")
 ```
 
-**Expected:** The overflow menu opens, showing **Show All**, **Collapse All**, **Reorder** and a row of layout options. This confirms the coordinate transformation is consistent across more than one element, in a different region of the screen.
+**Expected:** `status: Toolbar Search = "landscape"`.
 
 ### #34 Clean up
 
@@ -416,11 +323,9 @@ destroy_simulator(id: "landscape-test")
 
 ## Part 3 — Round-trip timing
 
-Measures how long the **server** takes, with no model in the loop. Driving the
-tools through an agent measures the agent; this measures the tool.
+Measures how long the **server** takes, with no model in the loop. Driving the tools through an agent measures the agent; this measures the tool.
 
-Needs the server in HTTP mode and a booted simulator in a session named `rtt`.
-Start one however you like, then:
+Needs the server in HTTP mode and a booted simulator in a session named `rtt`. Start one however you like, then:
 
 ```bash
 call() {
@@ -450,8 +355,7 @@ time_tool ui_describe_all   '{"id":"rtt"}'
 time_tool ui_view           '{"id":"rtt"}'
 ```
 
-**Expected**, as medians on an M-series Mac. Exact numbers vary with the machine
-and what else is running; the **ratios** are what matter:
+**Expected**, as medians on an M-series Mac. Exact numbers vary with the machine and what else is running; the **ratios** are what matter:
 
 | Call | Order of magnitude |
 |---|---|
@@ -464,15 +368,10 @@ and what else is running; the **ratios** are what matter:
 
 Two things to check rather than exact figures:
 
-- **`ui_tap` and `ui_describe_point` are single-digit milliseconds.** If they are
-  not, something is wrong with the companion connection, not with the tool.
-- **Anything reading the whole screen costs ~300 ms**, because it reads the app's
-  real view hierarchy. A `ui_find` that misses pays the same, since it falls back
-  to that read. This is the reason to tap by name rather than describing the
-  screen and picking coordinates.
+- **`ui_tap` and `ui_describe_point` are single-digit milliseconds.** If they are not, something is wrong with the companion connection, not with the tool.
+- **Anything reading the whole screen costs ~300 ms**, because it reads the app's real view hierarchy. A `ui_find` that misses pays the same, since it falls back to that read. This is the reason to tap by name rather than describing the screen and picking coordinates.
 
-Discard the first call after a simulator starts — it includes connecting to the
-companion and runs an order of magnitude slower than the rest.
+Discard the first call after a simulator starts — it includes connecting to the companion and runs an order of magnitude slower than the rest.
 
 ---
 
@@ -483,18 +382,18 @@ All tools tested:
 | Tool | Steps |
 |------|-------|
 | `start_simulator` | #1, #21, #23 |
-| `destroy_simulator` | #20, #22, #34 |
+| `destroy_simulator` | #21, #22, #34 |
 | `attach_simulator` | #21 |
 | `detect_rotation` | #27 |
-| `ui_describe_all` | #3, #29, #32 |
-| `ui_find` | #6, #29, #32 |
-| `ui_tap` | #7, #10, #15, #24.5, #30, #33 |
-| `ui_type` | #11 |
+| `ui_describe_all` | #3, #10, #25, #29 |
+| `ui_find` | #11, #12, #13, #15, #30, #32, #33 |
+| `ui_tap` | #13, #14, #19, #30, #32, #33 |
+| `ui_type` | #15, #33 |
 | `ui_swipe` | #5 |
-| `ui_describe_point` | #4, #9, #15 |
-| `ui_view` | #2, #6, #8, #12, #19, #25, #28, #31, #33 |
-| `screenshot` | #13 |
-| `record_video` | #14 |
-| `stop_recording` | #16 |
-| `install_app` | #17 |
-| `launch_app` | #18, #24 |
+| `ui_describe_point` | #4, #16 |
+| `ui_view` | #2, #6, #9, #24, #28, #31 |
+| `screenshot` | #17 |
+| `record_video` | #18 |
+| `stop_recording` | #20 |
+| `install_app` | #7, #23 |
+| `launch_app` | #8, #23 |
