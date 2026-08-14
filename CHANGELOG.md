@@ -6,6 +6,10 @@ Adds device rotation, makes every tool recover a wedged simulator rather than
 two of them, and puts the first unit tests on the logic that decides where a tap
 lands.
 
+**Also carries everything under 2.0.3, which was never published** — v2.0.2 is
+the last release on npm, so the boot-wedge recovery and the bounded
+`start_simulator` arrive with this version rather than before it.
+
 ### New tool: `rotate`
 
 Rotates the device — `portrait`, `landscape_left`, `landscape_right`,
@@ -80,7 +84,11 @@ swipes use. It now calls the same function, so the two cannot drift apart.
 
 CI and the publish workflow both run the tests.
 
-## 2.0.3
+## 2.0.3 — never published
+
+Written up as a release and then not tagged, so none of it reached npm on its
+own; it ships as part of 2.1.0. Kept as its own section because the work is
+self-contained and worth reading separately.
 
 Recovers a simulator whose accessibility service never starts, and stops
 `start_simulator` outlasting the client that called it.
