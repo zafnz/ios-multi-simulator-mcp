@@ -93,7 +93,34 @@ destroyed when the server itself shuts down unless
 > Requests are checked against an allowlist of `Host` headers, which stops a web
 > page you happen to visit from pointing a hostname it controls at `127.0.0.1`
 > and driving the server from your browser. If you deliberately reach the server
-> by another name, add it to `IOS_SIMULATOR_MCP_ALLOWED_HOSTS`.
+> by another name, add it to `IOS_SIMULATOR_MCP_ALLOWED_HOSTS`. A rejected
+> request says so, lists what is accepted, and names that variable.
+
+### Running the client in a container
+
+The simulators live on the host — a container cannot run them — so the usual
+shape is the server on the host and the client inside the container, reaching
+out through Docker's host alias:
+
+```bash
+# on the host: listen where the container can reach it
+npx -y ios-multi-simulator-mcp --host 0.0.0.0 --port 8008
+```
+
+```json
+{ "mcpServers": { "ios-multi-simulator": {
+  "type": "http", "url": "http://host.docker.internal:8008/mcp"
+} } }
+```
+
+`host.docker.internal`, `gateway.docker.internal` and Podman's
+`host.containers.internal` are accepted by default. Any other name — a proxy, a
+LAN address, a hostname of your own — needs
+`IOS_SIMULATOR_MCP_ALLOWED_HOSTS="that.name:8008"`.
+
+Binding to `0.0.0.0` exposes an unauthenticated server to every network the host
+is on, so do it only on a machine you trust, and prefer publishing the port to
+the container alone where your setup allows it.
 
 **Launch an app and navigate:**
 
@@ -203,7 +230,7 @@ CLI flags take precedence over the equivalent environment variables:
 | `IOS_SIMULATOR_MCP_HTTP_PORT` | Listen port in HTTP mode (default: `8008`) | `8008` |
 | `IOS_SIMULATOR_MCP_CLEANUP_ON_EXIT` | Destroy owned simulators when the server shuts down (default: `true`) | `false` |
 | `IOS_SIMULATOR_MCP_VERBOSE` | Log client connections and tool calls to stderr in HTTP mode (default: `false`) | `true` |
-| `IOS_SIMULATOR_MCP_ALLOWED_HOSTS` | Extra `host:port` values accepted in the HTTP `Host` header. Only needed behind a proxy or when reaching the server by another name | `mac.local:8008` |
+| `IOS_SIMULATOR_MCP_ALLOWED_HOSTS` | Extra `host:port` values accepted in the HTTP `Host` header. Loopback and the container host aliases are accepted already; this is for a proxy, a LAN address, or a name of your own | `mac.local:8008` |
 
 In http mode these belong in the shell that starts the server, since that is the
 process they configure — the client only holds a URL:

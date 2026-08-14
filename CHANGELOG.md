@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+### Fixed: a client in a container could not connect
+
+Since 2.0.0, a client reaching the server at `host.docker.internal` was refused
+with `403 Invalid Host header` — which is the primary way this server is used,
+the simulators being on the host and the agent in a container.
+
+The cause was the DNS rebinding protection added in 2.0.0: it allowlisted the
+loopback spellings and nothing else, so the container host aliases fell outside
+it. `host.docker.internal`, `gateway.docker.internal` and Podman's
+`host.containers.internal` are now accepted by default.
+
+This does not weaken the protection. It works by rejecting a name the *attacker*
+controls, and these are not such names: `.internal` is reserved by ICANN and
+cannot be served by public DNS, and the container runtime resolves these locally
+to the host the container is already running on. `Host: evil.example.com` is
+still refused.
+
+A refusal now also explains itself — what was rejected, what is accepted, and
+the `IOS_SIMULATOR_MCP_ALLOWED_HOSTS` setting that permits a name of your own —
+rather than the SDK's bare `Invalid Host header`. The README gains the container
+recipe.
+
 ## 2.1.0
 
 Adds device rotation, makes every tool recover a wedged simulator rather than

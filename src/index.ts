@@ -2493,8 +2493,35 @@ function readJsonBody(req: http.IncomingMessage): Promise<unknown> {
  * Set IOS_SIMULATOR_MCP_ALLOWED_HOSTS (comma separated, `host:port`) when
  * fronting the server with a proxy or reaching it by another name on purpose.
  */
+/**
+ * The names a container uses to reach a service on its host.
+ *
+ * Allowed by default because running the client in a container and the server
+ * on the host is a first-class way to use this server, and rejecting it was a
+ * regression: DNS rebinding protection arrived with the switch to HTTP and
+ * allowlisted only the loopback spellings, so every containerised client began
+ * getting `403 Invalid Host header: host.docker.internal:<port>` with nothing
+ * in the message to suggest a remedy.
+ *
+ * This does not weaken the protection. A rebound request carries a name the
+ * *attacker* controls, and these are not such names: `.internal` is reserved by
+ * ICANN and cannot be registered or served by public DNS, and these particular
+ * names are resolved locally by the container runtime to the host it is already
+ * running on. There is no way for a hostile page to make a browser send one.
+ */
+const CONTAINER_HOST_NAMES = [
+  "host.docker.internal",
+  "gateway.docker.internal",
+  "host.containers.internal", // Podman
+];
+
 function allowedHostHeaders(host: string, port: number): string[] {
-  const names = new Set(["127.0.0.1", "localhost", "[::1]"]);
+  const names = new Set([
+    "127.0.0.1",
+    "localhost",
+    "[::1]",
+    ...CONTAINER_HOST_NAMES,
+  ]);
   // A wildcard bind tells us nothing about the name clients will use, so only
   // add an explicit address.
   if (host && host !== "0.0.0.0" && host !== "::") names.add(host);
@@ -2512,6 +2539,7 @@ function allowedHostHeaders(host: string, port: number): string[] {
 
 async function runHttp() {
   const { host, port } = config;
+  const allowedHosts = allowedHostHeaders(host, port);
 
   const httpServer = http.createServer(async (req, res) => {
     const peer = `${req.socket.remoteAddress}:${req.socket.remotePort}`;
@@ -2533,6 +2561,35 @@ async function runHttp() {
       return;
     }
 
+    // Checked here as well as in the transport, purely so the answer is useful.
+    // The SDK's own rejection is `Invalid Host header: <host>`, which tells an
+    // operator what was refused but not that this is deliberate, nor how to
+    // permit a name they reach the server by on purpose.
+    const sentHost = req.headers.host ?? "";
+    if (!allowedHosts.includes(sentHost)) {
+      vlog(`${peer} rejected: Host "${sentHost}" is not in the allowlist`);
+      res.writeHead(403, { "Content-Type": "application/json" }).end(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          error: {
+            code: -32000,
+            message:
+              `Rejected a request whose Host header is "${sentHost}". This server ` +
+              `only answers to the addresses it is reached by on purpose, because ` +
+              `a web page you visit could otherwise point a hostname it controls ` +
+              `at this port and drive the simulator from your browser.\n\n` +
+              `Currently accepted: ${allowedHosts.join(", ")}.\n\n` +
+              `If "${sentHost}" is how you legitimately reach this server — behind ` +
+              `a proxy, or under another name — start it with ` +
+              `IOS_SIMULATOR_MCP_ALLOWED_HOSTS="${sentHost}" (comma separated for ` +
+              `several).`,
+          },
+          id: null,
+        })
+      );
+      return;
+    }
+
     // Stateless: a fresh server + transport per request. Durable simulator state
     // lives in module-global maps, so it is shared across all requests and
     // survives client disconnects/reconnects.
@@ -2546,7 +2603,7 @@ async function runHttp() {
       // The rebound request still carries the attacker's name in Host, so an
       // allowlist of the addresses we actually serve rejects it.
       enableDnsRebindingProtection: true,
-      allowedHosts: allowedHostHeaders(host, port),
+      allowedHosts,
       // Deliberately no allowedOrigins: the SDK rejects a request that has no
       // Origin header once that list is set, and non-browser MCP clients do not
       // send one. Host alone is what defeats rebinding.
