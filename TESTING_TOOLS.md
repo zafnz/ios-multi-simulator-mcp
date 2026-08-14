@@ -2,7 +2,13 @@
 
 Exercises every MCP tool against one simulator. Part 1 covers portrait, Part 2 verifies coordinates after rotation, Part 3 times the server.
 
-Every step here is an MCP tool call, so an agent can run the whole thing. For transports, multiple sessions on one server and process lifecycle — none of which an agent can drive — see [TESTING_SERVER.md](TESTING_SERVER.md).
+**Run this through the `mcp__ios-multi-simulator__*` tools, one call at a time.
+Do not script it without explicit permission.**
+
+With the users permission you have `scripts/imsmd.sh start|stop|restart` that can
+control the mcp for your dev and testing.
+
+For transports, multiple sessions on one server and process lifecycle — none of which an agent can drive — see [TESTING_SERVER.md](TESTING_SERVER.md).
 
 Session ID used throughout: `test-session`
 
@@ -195,7 +201,7 @@ ui_tap(id: "test-session", label: "Nav Button")
 stop_recording(id: "test-session")
 ```
 
-**Expected:** "Recording stopped successfully." The video file exists at the path from #18 and is several MB.
+**Expected:** "Recording stopped successfully." The video file exists at the path from #18, is at least a few seconds long, and is at least 100KB. Do not expect megabytes: the fixture is a mostly white, mostly static screen, which HEVC compresses very well — a 12-second recording of it came to 468KB.
 
 ### #21 destroy_simulator, then attach to a new one
 
@@ -362,7 +368,7 @@ time_tool ui_view           '{"id":"rtt"}'
 | Call | Order of magnitude |
 |---|---|
 | `ui_tap` by coordinate | ~2 ms |
-| `ui_describe_point` | ~10 ms |
+| `ui_describe_point` | under 50 ms |
 | `ui_find`, name present in the cheap tree | ~25 ms |
 | `ui_find`, name absent — falls back | ~300 ms |
 | `ui_describe_all` | ~300 ms |
@@ -370,7 +376,7 @@ time_tool ui_view           '{"id":"rtt"}'
 
 Two things to check rather than exact figures:
 
-- **`ui_tap` and `ui_describe_point` are single-digit milliseconds.** If they are not, something is wrong with the companion connection, not with the tool.
+- **`ui_tap` and `ui_describe_point` are fast** — single-digit milliseconds on an idle machine, and under 50 ms in any case. Past that, something is wrong with the companion connection, not with the tool. Both scale with what else the machine is doing: a busy Mac was measured at 5 ms and 22 ms for these two, with every other figure in the table up by the same factor.
 - **Anything reading the whole screen costs ~300 ms**, because it reads the app's real view hierarchy. A `ui_find` that misses pays the same, since it falls back to that read. This is the reason to tap by name rather than describing the screen and picking coordinates.
 
 Discard the first call after a simulator starts — it includes connecting to the companion and runs an order of magnitude slower than the rest.
