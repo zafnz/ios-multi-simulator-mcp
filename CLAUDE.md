@@ -139,6 +139,36 @@ CI (`.github/workflows/ci.yml`) runs the typecheck, the unit tests and a
 packed-install smoke test on every push. None of them needs a simulator, so none
 of them replaces the manual plans above.
 
+## Running the server during development
+
+**Use `scripts/imsmd.sh start|stop|restart|status`, and nothing else. Never
+start or stop a server any other way.**
+
+```bash
+scripts/imsmd.sh restart          # after every build, or you are testing the old one
+scripts/imsmd.sh status
+```
+
+It manages exactly one server, on port 8008 (`IOS_SIMULATOR_MCP_HTTP_PORT`),
+recorded in a pidfile, logging to `/tmp/imsm-daemon.log`.
+
+This is not a convenience. **Other people's servers run on this machine, on
+other ports, from this same checkout**, and they are production. So:
+
+- **Never `pkill`, `killall`, or `kill` a PID you did not personally start.** A
+  server on another port is not yours, whatever its command line looks like. A
+  Claude once added a `pkill -f build/index.js` to this very script "to catch
+  leftovers", and it killed a production server; that is why `stop` now touches
+  only the pidfile PID and merely *reports* a port held by anything else.
+- **Never start a server on another port to test something.** Test against the
+  managed one on 8008. If a port other than 8008 answers, it belongs to someone
+  else — leave it alone, including for read-only probing, because a request is
+  not free either.
+- **The MCP tools in a Claude Code session bind to their tool list at connect
+  time**, so a tool added after that session started is invisible to it. Restart
+  the daemon and drive the new tool over HTTP (`curl` to
+  `http://127.0.0.1:8008/mcp`); do not conclude the tool is missing.
+
 ## Important Design Principles
 
 - **Keep it simple**: minimal dependencies, standard tooling (npm/tsc)
@@ -153,6 +183,11 @@ of them replaces the manual plans above.
 - **Stay out of the user's idb**: we never read, write or enumerate `/tmp/idb`,
   which brew's companion and the Python client share. Our sockets live in
   `/tmp/imsm-<uid>/` and we only ever signal a process we spawned.
+- **Only ever signal a process we started.** The rule above is about the
+  server's own code; it applies just as much to anything run during development.
+  See "Running the server during development" — `scripts/imsmd.sh` is the only
+  way to start or stop a server, and no process on another port is ever ours to
+  kill.
 
 ## Additional Documentation
 
