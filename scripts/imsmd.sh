@@ -8,10 +8,20 @@
 #   imsmd.sh status
 set -uo pipefail
 
+PORT=${IOS_SIMULATOR_MCP_HTTP_PORT:-8008}
 PIDFILE=/tmp/imsm-daemon.pid
 LOG=/tmp/imsm-daemon.log
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 
+# Kills the process in the pidfile and nothing else.
+#
+# This used to end with `pkill -f "$ROOT/build/index.js"`, to stop a leftover
+# process from answering after a restart and making it look like the new build
+# was live. That killed every server started from this checkout, on any port,
+# including production ones belonging to someone else -- and it did so silently.
+# The pidfile exists precisely so that cannot happen. If something else is
+# holding the port, say so and let a human decide; never reach for a process we
+# did not start.
 stop() {
   if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
     kill "$(cat "$PIDFILE")" 2>/dev/null
@@ -20,17 +30,19 @@ stop() {
       sleep 0.25
     done
   fi
-  # Anything else holding the port would make a restart look like it worked
-  # while the old build kept answering.
-  pkill -f "$ROOT/build/index.js" 2>/dev/null
-  sleep 1
   rm -f "$PIDFILE"
+
+  if lsof -nP -iTCP:$PORT -sTCP:LISTEN >/dev/null 2>&1; then
+    echo "WARNING: port $PORT is still in use by a process this script did not start:" >&2
+    lsof -nP -iTCP:$PORT -sTCP:LISTEN >&2
+    echo "Leaving it alone. Stop it yourself, or use a different port." >&2
+  fi
   echo "stopped"
 }
 
 start() {
-  if lsof -nP -iTCP:8008 -sTCP:LISTEN >/dev/null 2>&1; then
-    echo "ERROR: port 8008 already in use; run stop first" >&2
+  if lsof -nP -iTCP:$PORT -sTCP:LISTEN >/dev/null 2>&1; then
+    echo "ERROR: port $PORT already in use; run stop first" >&2
     exit 1
   fi
   : > "$LOG"
@@ -55,7 +67,7 @@ case "${1:-status}" in
     else
       echo "not running"
     fi
-    lsof -nP -iTCP:8008 -sTCP:LISTEN 2>/dev/null | tail -1
+    lsof -nP -iTCP:$PORT -sTCP:LISTEN 2>/dev/null | tail -1
     ;;
   *) echo "usage: $0 {start|stop|restart|status} [KEY=VALUE ...]" >&2; exit 1 ;;
 esac
