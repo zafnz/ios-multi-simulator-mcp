@@ -1,10 +1,10 @@
-# Quality Assurance
+# Testing the server
 
-Release checks for the things **[TESTING.md](TESTING.md) does not cover**: transports, multiple sessions on one server, and process lifecycle.
+Transports, multiple sessions on one server, and process lifecycle.
 
-TESTING.md exercises every tool against a single simulator. Nothing here repeats that — if a tool misbehaves, this guide will not be what catches it.
+For the tools themselves, see [TESTING_TOOLS.md](TESTING_TOOLS.md) — nothing here repeats it, so if a tool misbehaves this guide will not be what catches it.
 
-These cases need two MCP clients and a terminal, so they are run by hand.
+**A human has to run these.** They need two MCP clients, a terminal, and Ctrl-C on a foreground process; an agent calling tools cannot drive any of it.
 
 ---
 

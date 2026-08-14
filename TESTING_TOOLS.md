@@ -1,6 +1,8 @@
-# Manual Testing Guide
+# Testing the tools
 
-Step-by-step test plan that exercises every MCP tool. Part 1 covers portrait, Part 2 verifies coordinates after rotation, Part 3 times the server.
+Exercises every MCP tool against one simulator. Part 1 covers portrait, Part 2 verifies coordinates after rotation, Part 3 times the server.
+
+Every step here is an MCP tool call, so an agent can run the whole thing. For transports, multiple sessions on one server and process lifecycle — none of which an agent can drive — see [TESTING_SERVER.md](TESTING_SERVER.md).
 
 Session ID used throughout: `test-session`
 

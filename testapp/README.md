@@ -3,7 +3,7 @@
 A minimal UIKit app for exercising this MCP server's UI tools. **Not shipped
 with the package** (`package.json`'s `files` covers `build` and
 `companion.lock.json` only) and not part of the server in any way — it exists
-so [TESTING.md](../TESTING.md) has a fixture it controls, instead of borrowing
+so [TESTING_TOOLS.md](../TESTING_TOOLS.md) has a fixture it controls, instead of borrowing
 Apple's apps and their first-run wizards.
 
 ## Why it looks the way it does
@@ -67,4 +67,4 @@ launch_app(id: "test-session", bundle_id: "com.example.mcptestapp")
   useful as the control case when something else disagrees.
 
 Landscape is supported, so the fixture can also stand in for Photos in the
-landscape coordinate section of TESTING.md.
+landscape coordinate section of TESTING_TOOLS.md.

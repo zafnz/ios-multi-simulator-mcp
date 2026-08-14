@@ -43,9 +43,9 @@ Both cosmetic — the server behaves correctly, the advertised schema just under
 - [ ] **#20** `ui_tap` marks only `id` as required, with `label`, `x` and `y` all optional, so "label **or** coordinates" is enforced only at runtime. A client validating against the schema alone would think a bare `{id}` tap is valid. Consider expressing the choice in the schema (oneOf / two variants).
 - [ ] **#21** Inconsistent param types for the same concept: `ui_swipe.duration` and `ui_tap.duration` are strings with a numeric pattern (`^\d+(\.\d+)?$`) while `ui_swipe.delta` is a plain number. Easy to get wrong on first use.
 
-# TODO — TESTING.md run, 2026-08-12
+# TODO — TESTING_TOOLS.md run, 2026-08-12
 
-Found while working through TESTING.md step-by-step on an iPhone 17 Pro (root frame 402x874).
+Found while working through TESTING_TOOLS.md step-by-step on an iPhone 17 Pro (root frame 402x874).
 
 ## Product bugs
 
@@ -66,15 +66,15 @@ Found while working through TESTING.md step-by-step on an iPhone 17 Pro (root fr
   - Suggests the bug may relate to freshly-presented / transient UI (a search-results overlay that has just appeared), rather than to a specific control type. Worth testing whether a delay or a re-query returns a populated tree.
 - [ ] **#23** Consider whether `ui_find` should match on `AXValue` as well as `AXLabel`, or at least report when an element matched by value was skipped. Related to #22 — several real controls carry their visible text in `AXValue` with a null `AXLabel`.
 
-## TESTING.md defects
+## TESTING_TOOLS.md defects
 
-> **All of the below were fixed in TESTING.md on 2026-08-12.** Part 1 was re-based onto Contacts (page 2 of the home screen, reached by the swipe test, and free of first-run wizards); the search-results swipe was removed; Part 2 gained step #24.5 to dismiss the two Photos wizards and was retargeted at "Collections" and the overflow menu. Part 1 was renumbered to still end at #22 so Part 2 keeps its original #23–#34 numbering. Kept here as a record of what was wrong.
+> **All of the below were fixed in TESTING_TOOLS.md on 2026-08-12.** Part 1 was re-based onto Contacts (page 2 of the home screen, reached by the swipe test, and free of first-run wizards); the search-results swipe was removed; Part 2 gained step #24.5 to dismiss the two Photos wizards and was retargeted at "Collections" and the overflow menu. Part 1 was renumbered to still end at #22 so Part 2 keeps its original #23–#34 numbering. Kept here as a record of what was wrong.
 
 - [ ] **#24** "Wait ~10 seconds for the simulator to fully boot" (steps #1, #20, #23) is wrong — observed ~40s on this machine. Stale in three places. If #18 is fixed by making `start_simulator` block until ready, these should be deleted rather than re-timed.
 - [ ] **#25** Step #7 says to tap "the search field" in Settings, which is ambiguous: Settings has both a search text field in the bottom toolbar and a "Search" settings row. Name the target precisely.
 - [ ] **#26** Step #26 is a manual step ("Hardware > Rotate Left") that an agent cannot perform — no rotation tool is exposed by the server, and driving the Simulator app directly is forbidden by CLAUDE.md. All of Part 2 (#27–#33, the entire landscape coordinate verification) depends on it. Either the plan documents it as human-in-the-loop, or a rotation tool needs to exist.
 - [ ] **#27** Steps #16/#17 have no fixture: `install_app` takes "`<path to a .app bundle>`" and `launch_app` "`<bundle id of installed app>`", but the plan never names one and the repo does not appear to ship one. Not runnable as written.
-- [ ] **#28** `ui_find` is not covered anywhere in TESTING.md — the plan's own coverage table lists 15 tools, the server advertises 16.
+- [ ] **#28** `ui_find` is not covered anywhere in TESTING_TOOLS.md — the plan's own coverage table lists 15 tools, the server advertises 16.
 - [ ] **#30** Steps #9–#11 are flaky by construction. #9 asserts that searching "General" in Settings shows "filtered search results", but Settings search depends on a background index that is not built on a freshly-created simulator — observed **No Results for "General"** on a sim a few minutes old. #10 then swipes "to scroll the results" and #11 asserts the list scrolled, both of which are unverifiable against an empty state. Retarget the swipe at something reliably scrollable (the Settings root list, or the home screen) instead of search results.
   - Aside worth knowing: tapping the Settings search field suggests "Apps", "Developer" etc., yet searching for those also returns nothing until the index builds. The suggestions are not backed by the same index.
 - [ ] **#31** Step #7 does not account for the first-run **QuickPath keyboard overlay** ("Speed up your typing by sliding your finger…" + Continue), which covers the keyboard on a fresh simulator. It turned out to be harmless — `ui_type` still delivered text and the overlay dismissed itself — but the step's stated expectation ("the keyboard appears") does not match what a tester actually sees.
@@ -130,7 +130,7 @@ Hit-testing that same screen finds every one of the missing controls, same pid, 
   - **This refines the conclusion in the table above.** The reporter shows the field *is* visible in Apple's own **Accessibility Inspector**. So the element is present in Apple's accessibility hierarchy — it is specifically the `AXPTranslator` parent→child traversal idb uses that fails to surface it, not the hierarchy itself. Still not deliberate concealment and still not idb discarding it, but more tractable than "Apple will not give it to us": a different traversal (axbridge) should reach it.
   - Worth adding our findings to #892 once axbridge is confirmed — it is the same bug and currently has no response.
 - [ ] **#37** Not a bug, but worth documenting: when a **system modal** is up (e.g. the notifications permission alert), the frontmost application *is the alert's process*, so `ui_describe_all` correctly returns only the alert's tree (pid 59695) and the app underneath vanishes entirely. That tree is fully populated. Agents should expect the app to disappear from the tree while a permission dialog is showing, rather than read it as the tree bug.
-- [ ] **#38** `ui_find` / `ui_tap {label}` do exact substring matching, so **typographic characters bite**: the permission button is labelled `Don’t Allow` with U+2019, and an ASCII `Don't Allow` finds nothing. Consider normalising curly quotes/apostrophes and dashes on both sides of the comparison. Fixed in TESTING.md; the tool behaviour is unchanged.
+- [ ] **#38** `ui_find` / `ui_tap {label}` do exact substring matching, so **typographic characters bite**: the permission button is labelled `Don’t Allow` with U+2019, and an ASCII `Don't Allow` finds nothing. Consider normalising curly quotes/apostrophes and dashes on both sides of the comparison. Fixed in TESTING_TOOLS.md; the tool behaviour is unchanged.
 
 ## CONFIRMED FIX — submodule bumped and companion rebuilt, 2026-08-12
 
