@@ -263,6 +263,13 @@ never declared as a dependency — in the repository it resolved through
 - [x] **#23 AXValue.** The fallback matches an element's visible text as well as its label, so search fields — null label, text in `AXValue` — are nameable. **Implemented but not verified**: no value-only element was on the test screen. Contacts' search field is the known case; worth a targeted run.
 - [x] **#45 one shape everywhere.** `canonicalise` reduces every element to the same six fields, client-side. Necessary because `keys` is honoured for point and whole-screen reads but **ignored for marker queries** — `ui_find` returned 16 fields where `ui_describe_point` returned 6, for the same element. Verified: both now draw from one set.
 
+## 2.0.3 — done 2026-08-13
+
+- [x] **#54 The boot wedge.** ~1 in 4 fresh simulators came up fully rendered and tap-responsive with accessibility permanently dead. Cure found and verified: restart `com.apple.CoreSimulator.bridge` in the guest. Now automatic, with verbose logging and a bug-report prompt if it ever fails. **Cause still unknown** — full write-up, including the two hypotheses asserted before testing and both wrong, in [BOOT_BUG.md](BOOT_BUG.md).
+- [x] **#55 `start_simulator` bounded to 55s.** The 180s wait outlasted the MCP client, so the call was cancelled and the caller got nothing — no UDID, no session, no idea a simulator existed. Also gates on `simctl bootstatus` (capped at 30s) instead of a fixed sleep, and fires recovery on remaining budget rather than elapsed age, so it is always attempted and always has room to work.
+- [ ] **#56 Recovery only covers the boot path.** The wedge can presumably occur later too, and a UI call that hits it mid-session gets the improved error message but no automatic recovery. `describeAll` recovers via `diagnoseEmptyAccessibilityTree`; `ui_view`, `ui_tap` and friends do not. Recovery belongs in the shared accessibility error path, not just at boot.
+- [ ] **#57 Report the `remediationRequired` gap upstream.** idb's own cure is gated behind a predicate that excludes the case it would fix. Probably best filed against the 0x0-tree symptom, where the analysis applies most cleanly. See BOOT_BUG.md.
+
 ## 2.0.3 candidates
 
 - [ ] **#26 rotation tool — investigate the naming disconnect first.** `HIDOrientation` is in the proto with all four orientations, wired into the `HIDEvent` oneof, and already in our generated client, so the tool itself is small. What is not settled is what the names mean.

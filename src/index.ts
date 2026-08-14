@@ -805,13 +805,37 @@ async function diagnoseEmptyAccessibilityTree(udid: string): Promise<string> {
   }
 
   if (booted) {
+    // Restarting the bridge is the cheap cure and keeps the device and its
+    // apps; recreating the simulator was what this used to recommend, and costs
+    // every installed app for the same result.
+    vlog(
+      `simulator ${udid} answers point queries but serves an empty tree; ` +
+        `restarting ${BRIDGE_SERVICE} to recover`
+    );
+    try {
+      await restartSimulatorBridge(udid);
+      await new Promise((resolve) => setTimeout(resolve, 4000));
+      const el = await describePoint(udid, 100, 100);
+      if (el?.frame && (el.frame.width || el.frame.height)) {
+        vlog(`simulator ${udid} recovered after restarting ${BRIDGE_SERVICE}`);
+        return (
+          "The simulator's accessibility service had wedged. It was recovered by " +
+          "restarting the simulator bridge — retry the call that failed."
+        );
+      }
+    } catch (error) {
+      vlog(`bridge restart for ${udid} failed: ${toError(error).message}`);
+    }
+
     return (
       "The simulator is booted and answers point queries, but its accessibility " +
-      "tree is empty even after restarting idb_companion. Recover by calling " +
-      "destroy_simulator then start_simulator (this creates a fresh simulator; " +
-      "any installed app must be reinstalled). Before recreating, please gather " +
-      'diagnostics as described in the Troubleshooting guide under "Empty ' +
-      'accessibility tree" so the trigger can be identified.'
+      "tree is empty, and restarting both idb_companion and the simulator bridge " +
+      "failed to recover it. That is not expected: the bridge restart fixes this " +
+      "in every case seen so far. Please ask the user to file a bug at " +
+      "https://github.com/zafnz/ios-multi-simulator-mcp/issues with the simulator " +
+      "UDID and this message. To carry on meanwhile, call destroy_simulator then " +
+      "start_simulator — this creates a fresh simulator, so any installed app must " +
+      "be reinstalled."
     );
   }
 
@@ -894,11 +918,102 @@ async function handleToolError(
 }
 
 /**
- * How long to wait for a new simulator to start answering accessibility reads.
- * Observed 40-90s on an M-series Mac for a freshly created device; the bound is
- * generous because timing out here is worse than waiting.
+ * Total budget for `start_simulator` to return, ready or not.
+ *
+ * Bounded by the *caller's* patience rather than the simulator's: an MCP client
+ * cancels a tool call that takes too long, and a cancelled call tells the caller
+ * nothing at all -- not the UDID, not that a simulator was even created, not
+ * what to do next. That is strictly worse than returning honestly at 55s with a
+ * UDID and an instruction to poll, which is why this is a fraction of the 180s
+ * it used to be. A healthy simulator is ready in ~40s including the boot wait;
+ * anything past this is not going to be rescued by waiting a little longer.
  */
-const BOOT_READY_TIMEOUT_MS = 180_000;
+const BOOT_READY_TIMEOUT_MS = 55_000;
+
+/**
+ * How long to leave a freshly booted simulator alone before speaking to it.
+ * See `waitUntilDriveable`. Well under the ~30s a healthy device takes to
+ * become driveable, so it is not on the critical path.
+ */
+const BOOT_SETTLE_MS = 8_000;
+
+/**
+ * The guest service that owns the accessibility bridge, and the one to restart
+ * when it wedges. Restarting it is what `remediateSpringBoard` does inside idb.
+ */
+const BRIDGE_SERVICE = "com.apple.CoreSimulator.bridge";
+
+/**
+ * Budget for the recovery attempt and the probes after it, carved out of the
+ * end of the boot wait so the attempt is always made and always has room to
+ * take effect. A recovered simulator answered within ~5s in testing.
+ */
+const RECOVERY_TAIL_MS = 12_000;
+
+/**
+ * Never call a device wedged before this much unsuccessful polling, however
+ * little budget is left. A healthy device answers within ~5s of boot completing,
+ * so this only guards against restarting the bridge on one that is merely slow.
+ */
+const BRIDGE_RECOVERY_MIN_POLL_MS = 8_000;
+
+/**
+ * Cap on waiting for `simctl bootstatus`, which blocks until the device
+ * finishes booting and has been measured from 26s to 54s under load. Past this
+ * the poll below is a better use of the remaining budget than more waiting.
+ */
+const BOOTSTATUS_CAP_MS = 30_000;
+
+/**
+ * Restarts the guest's CoreSimulator bridge, recovering a simulator whose
+ * accessibility service never came up.
+ *
+ * A simulator can render its home screen, answer taps and serve `describe`
+ * while every accessibility read fails with "no translation object" — and it
+ * never recovers on its own. Stopping the bridge makes launchd bring a fresh
+ * one up, and the device answers within a few seconds. Verified on a wedged
+ * simulator: bridge pid changed, and describe/find/tap all worked immediately
+ * afterwards, with the device and its installed apps untouched.
+ *
+ * idb has this same cure — `remediateSpringBoard` runs exactly this stop — but
+ * only reaches for it when the root element has a zero frame *and* its owning
+ * pid is dead ("SpringBoard has crashed"). Our shape is a nil translation with
+ * SpringBoard alive, which that predicate excludes, so the fix never fires.
+ */
+async function restartSimulatorBridge(udid: string): Promise<void> {
+  await run("xcrun", ["simctl", "spawn", udid, "launchctl", "stop", BRIDGE_SERVICE]);
+}
+
+/**
+ * Blocks until CoreSimulator reports the device has finished booting.
+ *
+ * A real signal instead of a guess: `simctl bootstatus` is documented to
+ * "monitor the specified device and print boot status information until the
+ * device finishes booting". It says nothing about the accessibility service,
+ * which comes up later still — hence the settle and the polling after it — but
+ * it replaces the part that was previously a fixed sleep and would not have
+ * stretched under load.
+ *
+ * Failures are swallowed: this is a way to wait well, not a precondition.
+ */
+async function waitForBootStatus(udid: string, capMs: number): Promise<void> {
+  const child = execFile("xcrun", ["simctl", "bootstatus", udid, "-b"], {
+    shell: false,
+  });
+  try {
+    await Promise.race([
+      new Promise<void>((resolve) => child.on("exit", () => resolve())),
+      new Promise<void>((resolve) => setTimeout(resolve, capMs)),
+    ]);
+  } catch {
+    // Older Xcode, or a device that finished before we asked. The poll is the
+    // actual readiness test either way.
+  } finally {
+    // Nothing downstream needs this process once we have stopped waiting on it,
+    // and leaving it attached would outlive the call that started it.
+    if (child.exitCode === null) child.kill();
+  }
+}
 
 /**
  * Resolves once the simulator can actually be driven, or when the wait runs out.
@@ -920,8 +1035,22 @@ const BOOT_READY_TIMEOUT_MS = 180_000;
 async function waitUntilDriveable(
   udid: string,
   timeoutMs: number = BOOT_READY_TIMEOUT_MS
-): Promise<{ ready: boolean; waitedMs: number }> {
+): Promise<{ ready: boolean; waitedMs: number; recovered: boolean; recoveryTried: boolean }> {
   const started = Date.now();
+
+  // Wait on CoreSimulator's own signal first, then leave the device alone for a
+  // moment before speaking to it. The settle is belt-and-braces: it is cheap
+  // (a healthy device is not driveable for ~30s regardless) and there is some
+  // evidence that very early contact is implicated in the bridge wedge, but
+  // that evidence is weak — 20 boots with it and 10 without were both clean,
+  // and the failures come in bursts rather than at a steady rate. It is kept
+  // because it costs nothing, not because it is known to help.
+  await waitForBootStatus(udid, BOOTSTATUS_CAP_MS);
+  await new Promise((resolve) => setTimeout(resolve, BOOT_SETTLE_MS));
+
+  const pollingStarted = Date.now();
+  let recoveryTried = false;
+
   while (Date.now() - started < timeoutMs) {
     try {
       const frame = await companions.withClient(udid, async (client) => {
@@ -933,15 +1062,56 @@ async function waitUntilDriveable(
         return root?.frame ?? null;
       });
       if (frame && frame.width && frame.height) {
-        return { ready: true, waitedMs: Date.now() - started };
+        return {
+          ready: true,
+          waitedMs: Date.now() - started,
+          recovered: recoveryTried,
+          recoveryTried,
+        };
       }
     } catch {
-      // Every failure here is expected while booting; the deadline is the only
-      // thing that ends this loop early.
+      // Expected while booting. Only the deadline, or a successful read, ends
+      // this loop.
     }
+
+    // Past the point where a healthy device would have answered, stop waiting
+    // and treat it as the wedge: restart the bridge once, then keep polling.
+    // Doing this here rather than only reporting it means the common failure
+    // costs a caller seconds instead of a destroyed simulator.
+    // Recover when the budget is nearly gone rather than at a fixed age, so the
+    // attempt always gets made and always gets a window to work in. A fixed
+    // threshold cannot promise either: `bootstatus` alone has taken anywhere
+    // from 26s to 54s, so a threshold small enough to fire on a fast machine
+    // fires immediately on a slow one, and one large enough to be safe there is
+    // never reached before the deadline.
+    const remaining = timeoutMs - (Date.now() - started);
+    if (
+      !recoveryTried &&
+      remaining <= RECOVERY_TAIL_MS &&
+      Date.now() - pollingStarted > BRIDGE_RECOVERY_MIN_POLL_MS
+    ) {
+      recoveryTried = true;
+      vlog(
+        `simulator ${udid} has not answered accessibility for ` +
+          `${Math.round((Date.now() - pollingStarted) / 1000)}s after boot completed ` +
+          `(${Math.round((Date.now() - started) / 1000)}s total); restarting ${BRIDGE_SERVICE} to recover`
+      );
+      try {
+        await restartSimulatorBridge(udid);
+      } catch (error) {
+        vlog(`bridge restart for ${udid} failed: ${toError(error).message}`);
+      }
+    }
+
     await new Promise((resolve) => setTimeout(resolve, 2000));
   }
-  return { ready: false, waitedMs: Date.now() - started };
+
+  return {
+    ready: false,
+    waitedMs: Date.now() - started,
+    recovered: false,
+    recoveryTried,
+  };
 }
 
 // --- Tool registrations ---
@@ -1041,8 +1211,16 @@ if (!isToolFiltered("start_simulator")) {
           // boot` completes a minute or more before the accessibility bridge
           // answers, and a caller that trusts this tool's success will spend
           // that minute collecting errors that blame a fullscreen dialog.
-          const { ready, waitedMs } = await waitUntilDriveable(udid);
+          const { ready, waitedMs, recovered, recoveryTried } =
+            await waitUntilDriveable(udid);
           const seconds = Math.round(waitedMs / 1000);
+
+          if (ready) {
+            vlog(
+              `simulator ${udid} ready after ${seconds}s` +
+                (recovered ? " (recovered by restarting the bridge)" : "")
+            );
+          }
 
           return {
             isError: false,
@@ -1050,10 +1228,19 @@ if (!isToolFiltered("start_simulator")) {
               {
                 type: "text",
                 text: ready
-                  ? `Simulator started: "${deviceName}" (${deviceType.name}, ${udid}). Ready after ${seconds}s.`
-                  : `Simulator created and booting: "${deviceName}" (${deviceType.name}, ${udid}). ` +
-                    `It has not answered an accessibility read after ${seconds}s, which is longer than a simulator ` +
-                    `normally takes. It may still come up — poll ui_view until it returns a screenshot.`,
+                  ? `Simulator started: "${deviceName}" (${deviceType.name}, ${udid}). Ready after ${seconds}s.` +
+                    (recovered
+                      ? " Its accessibility service had to be recovered by restarting the simulator bridge."
+                      : "")
+                  : `Simulator created and booting: "${deviceName}" (${deviceType.name}, ${udid}), but it has not ` +
+                    `answered an accessibility read after ${seconds}s. ` +
+                    (recoveryTried
+                      ? `Restarting the simulator bridge did not recover it, which is not expected: that fixes this ` +
+                        `in every case seen so far. Please ask the user to file a bug at ` +
+                        `https://github.com/zafnz/ios-multi-simulator-mcp/issues with the simulator UDID and this message. ` +
+                        `Meanwhile, poll ui_view in case it recovers, or call destroy_simulator and start_simulator to ` +
+                        `start over.`
+                      : `Poll ui_view until it returns a screenshot.`),
               },
             ],
           };
@@ -1155,7 +1342,7 @@ if (!isToolFiltered("attach_simulator")) {
         // "Booted" is reported well before the accessibility bridge answers, so
         // attaching to a simulator that has only just come up has the same
         // problem as creating one. Costs nothing when it is already up.
-        const { ready, waitedMs } = await waitUntilDriveable(udid);
+        const { ready, waitedMs, recoveryTried } = await waitUntilDriveable(udid);
         const seconds = Math.round(waitedMs / 1000);
 
         return {
@@ -1166,7 +1353,12 @@ if (!isToolFiltered("attach_simulator")) {
               text: ready
                 ? `Attached to simulator: "${found.name}" (${udid})`
                 : `Attached to simulator: "${found.name}" (${udid}), but it has not answered an ` +
-                  `accessibility read after ${seconds}s. Poll ui_view until it returns a screenshot.`,
+                  `accessibility read after ${seconds}s. ` +
+                  (recoveryTried
+                    ? `Restarting the simulator bridge did not recover it, which is not expected. Please ask the ` +
+                      `user to file a bug at https://github.com/zafnz/ios-multi-simulator-mcp/issues with the ` +
+                      `simulator UDID and this message.`
+                    : `Poll ui_view until it returns a screenshot.`),
             },
           ],
         };

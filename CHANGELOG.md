@@ -1,5 +1,43 @@
 # Changelog
 
+## 2.0.3
+
+Recovers a simulator whose accessibility service never starts, and stops
+`start_simulator` outlasting the client that called it.
+
+### The boot wedge
+
+Roughly one in four freshly created simulators would come up rendering their
+home screen, responding to taps and answering `describe`, while every
+accessibility read failed — permanently, with an error blaming a fullscreen
+dialog that did not exist.
+
+`start_simulator` now detects this and recovers it, by restarting the guest's
+`com.apple.CoreSimulator.bridge`. A wedged simulator answers again within about
+five seconds, with the device and its installed apps intact. idb has the same
+cure internally but only applies it when SpringBoard has crashed, which is not
+this case.
+
+`ui_describe_all` recovers the same way instead of recommending you destroy and
+recreate the simulator, which cost every installed app for the same result. In
+verbose mode both paths log when they recover. If recovery ever fails — not yet
+observed — the message asks you to file a bug.
+
+**The cause is still unknown.** This is a verified cure, not a fix. What was
+ruled out, what was not, and why, is written up in
+[BOOT_BUG.md](BOOT_BUG.md).
+
+### `start_simulator` returns when it says it will
+
+It now waits on `simctl bootstatus` rather than a fixed sleep — measured to be a
+few seconds *earlier* than accessibility readiness, so nothing is lost — and
+returns within 55 seconds whatever happens.
+
+It previously waited up to three minutes, which outlasted the MCP client's
+patience: the call was cancelled and the caller learned nothing at all, not even
+that a simulator had been created. Returning honestly with a UDID and an
+instruction to poll is more useful than being killed mid-wait.
+
 ## 2.0.2
 
 Friction removal. Everything here is something an agent hit in the first minute.
