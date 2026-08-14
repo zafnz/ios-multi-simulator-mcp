@@ -110,6 +110,62 @@ Simulators the server created are its responsibility; ones it merely attached to
 
    **Expected:** that simulator survives, whatever the cleanup setting. The server only deletes what it owns.
 
+## An empty point is not a wedged bridge
+
+idb reports **one** error for two unrelated conditions: an accessibility bridge
+that is not answering, and a point read that found nothing. The second is an
+ordinary answer, and mistaking it for the first would have a caller's bridge
+restarted for tapping an empty patch of screen. Run the server verbose.
+
+1. `start_simulator` with `id: "wedge-test"`, install and launch `testapp/`, then
+   `ui_find "Plain Button"` and `ui_describe_point` at the centre of its frame.
+
+   **Expected:** both resolve to the button. The successful read is also what
+   marks the simulator as having answered, without which recovery deliberately
+   does nothing.
+2. `ui_describe_point` somewhere empty — `{x: 200, y: 600}` on that screen.
+
+   **Expected:** an error naming the coordinates —
+
+   ```
+   No accessibility element at (200, 600). The simulator is answering normally,
+   so that point is empty or covered — check the coordinates against ui_describe_all.
+   ```
+
+   — in tens of milliseconds, and **nothing about restarting anything in the
+   log**. A restart here is the failure this step exists to catch.
+
+## Recovering a wedged accessibility bridge
+
+A simulator can keep rendering and answering taps while every accessibility read
+fails forever, and it happens on its own to roughly one fresh simulator in four
+(see [BOOT_BUG.md](BOOT_BUG.md)).
+
+**There is no known way to induce it on demand, so this cannot be a scripted
+step.** Stopping the guest's bridge is not it: `xcrun simctl spawn <udid>
+launchctl stop com.apple.CoreSimulator.bridge` was measured to have launchd
+bring the service straight back, with the next read simply waiting ~700ms and
+succeeding — no wedge, nothing to recover. The real fault is a bridge that is
+*running and not translating*, which stopping a healthy one does not produce.
+
+What to do instead: when you meet one — a session where every accessibility read
+suddenly fails with "no translation object" while taps and screenshots still
+work — check that it cures itself. Any of `ui_tap {label}`, `ui_find`,
+`ui_describe_point`, `ui_describe_all` or `ui_view` should recover it, since they
+share one path.
+
+**Expected**, in the verbose log:
+
+```
+simulator <udid> stopped answering accessibility; restarting com.apple.CoreSimulator.bridge
+simulator <udid> recovered 11s after restarting com.apple.CoreSimulator.bridge
+```
+
+and the call that triggered it returns its answer rather than an error. Two
+things worth checking while you have one: a second tool call during the same
+minute must not order its own restart (`not restarting again` in the log), and a
+recovery that fails must say so rather than hanging.
+
 ## Port already in use
 
 1. With a server running on 8008, start a second one on the same port.

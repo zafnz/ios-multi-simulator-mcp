@@ -2,8 +2,41 @@
 
 ## Unreleased
 
-No behaviour change: the tool surface, its parameters and its output are
-identical.
+### Every tool recovers a wedged simulator, not two of them
+
+A simulator can render, respond to taps and answer `describe` while every
+accessibility read fails forever. Until now that was only cured while the
+simulator was booting, and afterwards only `ui_describe_all` and `ui_view` did
+anything about it — `ui_tap`, `ui_find`, `ui_type`, `ui_swipe` and
+`ui_describe_point` returned a clearer error and left the session dead, advising
+the caller to go and call a different tool.
+
+The cure now lives with the reads themselves, so every tool built on them gets
+it without knowing anything about it: the simulator's bridge is restarted, and
+the caller's own read is retried and served. Two rules keep it from doing harm,
+and both are unit tested in `src/ax/recovery.ts`:
+
+- **Never for a simulator that has not yet answered a read.** That one is
+  booting, not broken, and the boot wait already owns it with its own budget.
+- **Not more than once a minute per simulator.** A wedged simulator under an
+  agent fails every few hundred milliseconds; restarting under each failure
+  would leave the bridge permanently mid-restart.
+
+**`ui_describe_point` on an empty point now says so.** idb reports "no
+translation object" both for a bridge that is not answering and for a point with
+nothing on it, which is an ordinary answer. That is now told apart — by asking
+for the whole screen, which is unambiguous — so an empty point returns a message
+naming the coordinates instead of one blaming a fullscreen dialog, and does not
+cause a recovery.
+
+The wedge itself still cannot be induced on demand, so the recovery is verified
+by unit tests over its decision rules and by watching the mechanism run, not by
+a reproduction. `launchctl stop` on a healthy bridge does not produce it.
+
+### Tests
+
+No behaviour change from this part: the tool surface, its parameters and its
+output are identical.
 
 The pure logic — accessibility tree pruning, label matching, coordinate
 transforms — moved out of `src/index.ts` into `src/ax/` and gained unit tests

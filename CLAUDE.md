@@ -47,6 +47,10 @@ against a device costs a simulator boot apiece:
   the probe-candidate helpers.
 - `src/ax/orientation.ts` — `transformPointToPortrait` and the orientation
   vocabulary. This is the code that decides where a tap lands.
+- `src/ax/recovery.ts` — `shouldRecover`: when a failed accessibility read is
+  worth restarting the simulator's bridge for. The cure itself lives in
+  `index.ts`; only the decision is here, because getting it wrong is expensive
+  in both directions (see [BOOT_BUG.md](BOOT_BUG.md)).
 
 Both are deliberately dependency-free, including on each other and on anything
 else in this repository. That is what lets `npm test` run the TypeScript

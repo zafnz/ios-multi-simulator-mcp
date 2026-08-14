@@ -121,6 +121,34 @@ one. Untested here.
    suggesting anything expensive.
 6. **A bug-report prompt.** If recovery fails, the message tells the agent to ask
    the user to file an issue, because that has not yet been observed.
+7. **Recovery mid-session, not only at boot.** Every accessibility read —
+   whole-screen, marker lookup, point read, and so every tool built on them —
+   goes through one wrapper that restarts the bridge and retries once when a
+   read fails with `no translation object`. Recovery is deliberately refused for
+   a simulator that has never answered a read, because that is a device still
+   booting and item 1 already owns it; and it is refused for 60s after an
+   attempt, because a wedged simulator under an agent fails every few hundred
+   milliseconds and restarting under each failure would leave the bridge
+   permanently mid-restart. The rules are a pure function, `shouldRecover` in
+   [src/ax/recovery.ts](src/ax/recovery.ts), and are unit tested.
+
+   The boot wedge is what this file is about, but nothing says the bridge can
+   only wedge at boot; before this, a session that wedged mid-run got a clearer
+   error and no cure from any tool except `ui_describe_all` and `ui_view`.
+
+   **`no translation object` does not mean the bridge is wedged.** idb raises
+   the same error for a point read that found nothing, which is an ordinary
+   answer on a healthy simulator, so `describePoint` tells the two apart by
+   asking for the whole screen before anything is restarted. Worth knowing when
+   reading logs from a session: a burst of this error from point reads alone is
+   usually a caller with bad coordinates, not a sick simulator.
+
+**Still not reproducible on demand.** `launchctl stop` on a healthy bridge does
+not produce this fault: launchd brings the service straight back and the next
+read waits ~700ms and succeeds. The wedge is a bridge that is running and not
+translating, which stopping a working one does not simulate. That is why the
+recovery decision is unit tested and the cure is verified against real
+occurrences rather than an induced one.
 
 ## Worth reporting upstream
 

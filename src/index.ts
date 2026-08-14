@@ -29,6 +29,7 @@ import {
   getEffectiveOrientation,
   transformPointToPortrait,
 } from "./ax/orientation";
+import { isWedgeError, shouldRecover } from "./ax/recovery";
 
 const execFileAsync = promisify(execFile);
 
@@ -77,6 +78,11 @@ if (process.env.IOS_SIMULATOR_MCP_IDB_PATH) {
  * serves the same simulator correctly at the same moment. Since we own the
  * companion, the cure is to restart it and ask again, which the caller never
  * sees. That used to require recreating the simulator and losing its apps.
+ *
+ * An empty tree that survives that restart is the *guest* side of the same
+ * symptom, and the cure there is to restart the simulator's bridge — so both
+ * are tried before anyone sees a failure. `withAccessibilityRecovery` covers
+ * the third shape, where the read throws instead of returning nothing.
  */
 async function describeAll(udid: string): Promise<AXElement[]> {
   const read = () =>
@@ -88,11 +94,30 @@ async function describeAll(udid: string): Promise<AXElement[]> {
       return (Array.isArray(info) ? info : [info]) as AXElement[];
     });
 
-  const elements = await read();
-  if (!isDegenerateTree(elements)) return elements;
+  const usable = (elements: AXElement[]) => {
+    if (isDegenerateTree(elements)) return false;
+    markAccessibilityAnswered(udid);
+    return true;
+  };
 
-  await companions.shutdown(udid);
-  return read();
+  return withAccessibilityRecovery(udid, async () => {
+    let elements = await read();
+    if (usable(elements)) return elements;
+
+    await companions.shutdown(udid);
+    elements = await read();
+    if (usable(elements)) return elements;
+
+    // Only for a simulator that has answered before; a fresh one is booting.
+    if (
+      hasAnsweredAccessibility.has(udid) &&
+      (await recoverWedgedAccessibility(udid))
+    ) {
+      elements = await read();
+      usable(elements);
+    }
+    return elements;
+  });
 }
 
 /**
@@ -110,26 +135,29 @@ async function describeAll(udid: string): Promise<AXElement[]> {
  * answer is wrong in a way a caller cannot detect.
  */
 async function describeScreen(udid: string): Promise<AXElement[]> {
-  const elements = await companions.withClient(udid, async (client) => {
-    const read = async (backend?: Backend, keys?: string[]) => {
-      const info = await client.accessibilityInfo({
-        format: Format.NESTED,
-        backend,
-        keys,
-      });
-      if (info == null) return [] as AXElement[];
-      return (Array.isArray(info) ? info : [info]) as AXElement[];
-    };
+  const elements = await withAccessibilityRecovery(udid, () =>
+    companions.withClient(udid, async (client) => {
+      const read = async (backend?: Backend, keys?: string[]) => {
+        const info = await client.accessibilityInfo({
+          format: Format.NESTED,
+          backend,
+          keys,
+        });
+        if (info == null) return [] as AXElement[];
+        return (Array.isArray(info) ? info : [info]) as AXElement[];
+      };
 
-    try {
-      return await read(Backend.AXBRIDGE, DESCRIBE_KEYS);
-    } catch {
-      // A companion older than the one this server pins cannot start AXBridge.
-      // An incomplete tree beats no tree, so fall back rather than fail.
-      return await read();
-    }
-  });
+      try {
+        return await read(Backend.AXBRIDGE, DESCRIBE_KEYS);
+      } catch {
+        // A companion older than the one this server pins cannot start AXBridge.
+        // An incomplete tree beats no tree, so fall back rather than fail.
+        return await read();
+      }
+    })
+  );
 
+  if (!isDegenerateTree(elements)) markAccessibilityAnswered(udid);
   return pruneTree(elements);
 }
 
@@ -164,28 +192,36 @@ async function findByLabel(
   udid: string,
   label: string
 ): Promise<AXElement | null> {
-  const marker = await companions.withClient(udid, async (client) => {
-    try {
-      const found = (await client.accessibilityInfo({
-        marker: label,
-        matchKey: SearchableKey.LABEL,
-        keys: DESCRIBE_KEYS,
-      })) as { elements?: AXElement } | null;
-      const element = found?.elements;
-      if (!element) return null;
+  const marker = await withAccessibilityRecovery(udid, () =>
+    companions.withClient(udid, async (client) => {
+      try {
+        const found = (await client.accessibilityInfo({
+          marker: label,
+          matchKey: SearchableKey.LABEL,
+          keys: DESCRIBE_KEYS,
+        })) as { elements?: AXElement } | null;
+        markAccessibilityAnswered(udid);
+        const element = found?.elements;
+        if (!element) return null;
 
-      // `canonicalise` also drops the subtree the match arrives with. On the
-      // home screen that is nothing, but a match inside an app can drag ten
-      // kilobytes of descendants along with it, which would defeat the point of
-      // asking for one element. Callers wanting structure have ui_describe_all.
-      return canonicalise(element);
-    } catch (error) {
-      // "found no element" is how the companion reports an empty result, and is
-      // not a failure. Anything else is.
-      if (/found no element/i.test((error as Error).message)) return null;
-      throw error;
-    }
-  });
+        // `canonicalise` also drops the subtree the match arrives with. On the
+        // home screen that is nothing, but a match inside an app can drag ten
+        // kilobytes of descendants along with it, which would defeat the point of
+        // asking for one element. Callers wanting structure have ui_describe_all.
+        return canonicalise(element);
+      } catch (error) {
+        // "found no element" is how the companion reports an empty result, and is
+        // not a failure. Anything else is — including the wedge, which the
+        // wrapper above cures and retries. A search that reached the tree at all
+        // is proof the bridge is alive.
+        if (/found no element/i.test((error as Error).message)) {
+          markAccessibilityAnswered(udid);
+          return null;
+        }
+        throw error;
+      }
+    })
+  );
   if (marker) return marker;
 
   let tree: AXElement[];
@@ -221,15 +257,41 @@ async function describePoint(
   x: number,
   y: number
 ): Promise<AXElement> {
-  return companions.withClient(udid, async (client) =>
-    canonicalise(
-      (await client.accessibilityInfo({
-        point: { x: Math.round(x), y: Math.round(y) },
-        format: Format.LEGACY,
-        keys: DESCRIBE_KEYS,
-      })) as AXElement
-    )
-  );
+  return withAccessibilityRecovery(udid, async () => {
+    try {
+      return await companions.withClient(udid, async (client) => {
+        const element = (await client.accessibilityInfo({
+          point: { x: Math.round(x), y: Math.round(y) },
+          format: Format.LEGACY,
+          keys: DESCRIBE_KEYS,
+        })) as AXElement;
+        // A real frame, not merely a reply: a booting simulator answers a point
+        // read with an empty 0x0 element before its bridge is up.
+        if (element?.frame && (element.frame.width || element.frame.height)) {
+          markAccessibilityAnswered(udid);
+        }
+        return canonicalise(element);
+      });
+    } catch (error) {
+      // idb raises one error for two unrelated things: a bridge that is not
+      // answering, and a point with nothing on it. Only a point read can mean
+      // the second, so this is the one place that has to tell them apart — and
+      // it must, because the caller who taps an empty patch of screen would
+      // otherwise have the simulator's bridge restarted underneath them.
+      if (
+        isWedgeError(toError(error).message) &&
+        (await accessibilityIsAnswering(udid))
+      ) {
+        markAccessibilityAnswered(udid);
+        throw new Error(
+          `No accessibility element at (${Math.round(x)}, ${Math.round(y)}). ` +
+            `The simulator is answering normally, so that point is empty or ` +
+            `covered — check the coordinates against ui_describe_all.`
+        );
+      }
+      throw error;
+    }
+  });
 }
 
 // Read filtered tools from environment variable
@@ -364,6 +426,7 @@ async function cleanupAllSimulators(): Promise<void> {
       .map(async ({ udid }) => {
         try { await run("xcrun", ["simctl", "shutdown", udid]); } catch { /* may already be shut down */ }
         try { await run("xcrun", ["simctl", "delete", udid]); } catch { /* ignore cleanup errors */ }
+        forgetSimulator(udid);
       })
   );
   managedSimulators.clear();
@@ -471,11 +534,10 @@ function cacheScreenDims(sim: SimSession, frame: { width: number; height: number
  * Builds the error message for a `describe-all` that still yields a degenerate
  * root (0x0 frame, no children) after the companion has been restarted.
  *
- * The common cause is already handled before anyone reaches here: a companion
- * that has been up a while can wedge into serving an empty tree, and
- * `describeAll` restarts ours and retries. What is left is either a simulator
- * that has not finished booting, or one whose accessibility server is genuinely
- * broken.
+ * Both cures have already been tried before anyone reaches here: `describeAll`
+ * restarts our companion and retries, then restarts the simulator's bridge and
+ * retries again. What is left is either a simulator that has not finished
+ * booting, or one whose accessibility server is broken in a way neither fixes.
  *
  * We tell those apart by probing `describe-point`: on a booted-but-broken sim a
  * point query still returns a real frame, whereas a still-booting sim returns
@@ -487,37 +549,20 @@ async function diagnoseEmptyAccessibilityTree(udid: string): Promise<string> {
   // probe a few times and treat any real frame as "booted".
   let booted = false;
   for (let attempt = 0; attempt < 3 && !booted; attempt++) {
-    try {
-      const el = await describePoint(udid, 100, 100);
-      if (el?.frame && (el.frame.width || el.frame.height)) {
-        booted = true;
-      }
-    } catch {
-      // Point probe failed — try again, then fall through to "still booting".
-    }
+    booted = await accessibilityPointAnswers(udid);
   }
 
   if (booted) {
-    // Restarting the bridge is the cheap cure and keeps the device and its
-    // apps; recreating the simulator was what this used to recommend, and costs
-    // every installed app for the same result.
-    vlog(
-      `simulator ${udid} answers point queries but serves an empty tree; ` +
-        `restarting ${BRIDGE_SERVICE} to recover`
-    );
-    try {
-      await restartSimulatorBridge(udid);
-      await new Promise((resolve) => setTimeout(resolve, 4000));
-      const el = await describePoint(udid, 100, 100);
-      if (el?.frame && (el.frame.width || el.frame.height)) {
-        vlog(`simulator ${udid} recovered after restarting ${BRIDGE_SERVICE}`);
-        return (
-          "The simulator's accessibility service had wedged. It was recovered by " +
-          "restarting the simulator bridge — retry the call that failed."
-        );
-      }
-    } catch (error) {
-      vlog(`bridge restart for ${udid} failed: ${toError(error).message}`);
+    // A point query answering while the tree stays empty is the wedge; the
+    // cheap cure keeps the device and its apps, where recreating the simulator
+    // — what this used to recommend — costs every installed app for the same
+    // result. The cooldown means this is usually a no-op saying it was already
+    // tried moments ago.
+    if (await recoverWedgedAccessibility(udid)) {
+      return (
+        "The simulator's accessibility service had wedged. It was recovered by " +
+        "restarting the simulator bridge — retry the call that failed."
+      );
     }
 
     return (
@@ -583,13 +628,13 @@ function errorWithTroubleshooting(message: string): string {
  * there, which is a documented way to lose an afternoon.
  */
 function clarify(message: string): string {
-  if (/no translation object/i.test(message)) {
+  if (isWedgeError(message)) {
     return (
       "The simulator is not answering accessibility requests. It is usually " +
       "still booting — wait a few seconds and try again; a fresh simulator can " +
-      "take up to 90 seconds. If it persists well after boot, the accessibility " +
-      "tree is wedged: call ui_describe_all, which restarts the companion and " +
-      "retries.\n\n" +
+      "take up to 90 seconds. If the simulator was working a moment ago, its " +
+      "accessibility service has wedged; restarting it was already attempted " +
+      "and did not help, so retrying immediately is unlikely to either.\n\n" +
       `Original error: ${message}`
     );
   }
@@ -678,6 +723,246 @@ async function restartSimulatorBridge(udid: string): Promise<void> {
 }
 
 /**
+ * How long to keep asking a restarted bridge whether it is back.
+ *
+ * Poll rather than settle-and-check, because the settle time is not knowable.
+ * Measured on a deliberately stopped bridge: `simctl spawn ... launchctl stop`
+ * took ~5s to return, and the device answered ~11s after the restart was
+ * ordered. A single probe at 4s — what this did first — declared the recovery
+ * failed on a simulator that was serving reads 1.6s later, which is the worst
+ * possible answer: the cure worked and the caller was told it had not.
+ */
+const RECOVERY_PROBE_TIMEOUT_MS = 20_000;
+
+/** How often to ask, inside that window. */
+const RECOVERY_PROBE_INTERVAL_MS = 1_000;
+
+/**
+ * Attempts at the caller's read once the bridge is answering again.
+ *
+ * More than one because a bridge answers the recovery probe slightly before it
+ * answers reliably: measured on a restarted bridge, the probe succeeded, the
+ * read immediately after it failed with the same wedge error, and the next call
+ * 21ms later succeeded. Handing back a failure the cure had already fixed is
+ * the one outcome worth spending an extra second to avoid.
+ */
+const POST_RECOVERY_READ_ATTEMPTS = 3;
+
+/** Pause between those attempts. */
+const POST_RECOVERY_READ_DELAY_MS = 500;
+
+/**
+ * Shortest interval between two recovery attempts for one simulator.
+ *
+ * A wedged simulator being driven by an agent produces a failed read every few
+ * hundred milliseconds, and restarting the bridge under each one would leave it
+ * permanently mid-restart. Once the cure has been tried and the reads are still
+ * failing, the cause is something a restart does not fix, and the caller is
+ * better served by the error than by another minute of retries.
+ */
+const RECOVERY_COOLDOWN_MS = 60_000;
+
+/**
+ * Simulators that have served at least one accessibility read.
+ *
+ * This is what separates "wedged" from "still booting", and both look identical
+ * in the error text. A simulator that has never answered is simply not up yet —
+ * `waitUntilDriveable` owns that case and has its own, budgeted recovery — so
+ * restarting its bridge on the first failed read would fight the boot path for
+ * a device that is doing nothing wrong. One successful read is proof that the
+ * bridge worked, which makes a later failure a regression rather than a wait.
+ */
+const hasAnsweredAccessibility = new Set<string>();
+
+/**
+ * Records that a simulator served a *usable* read.
+ *
+ * Deliberately not "the call did not throw": a simulator that is still booting
+ * answers with a 0x0 root frame rather than an error, and treating that as
+ * proof of a working bridge would arm recovery against every device that is
+ * merely slow — the boot path's job, with its own budget.
+ */
+function markAccessibilityAnswered(udid: string): void {
+  hasAnsweredAccessibility.add(udid);
+}
+
+/** In-flight recovery per simulator, so concurrent failures share one attempt. */
+const recoveryInFlight = new Map<string, Promise<boolean>>();
+
+/** When each simulator's bridge was last restarted, for the cooldown above. */
+const lastRecoveryAt = new Map<string, number>();
+
+/** Forgets a simulator's recovery state. Called when its session ends. */
+function forgetSimulator(udid: string): void {
+  hasAnsweredAccessibility.delete(udid);
+  lastRecoveryAt.delete(udid);
+}
+
+/**
+ * Whether the simulator's accessibility service is answering at all.
+ *
+ * A whole-screen read rather than a point read, because a point read cannot
+ * answer this question: idb raises the *same* `no translation object` error for
+ * a dead bridge and for a point with nothing on it. Asking for the screen has
+ * no such ambiguity — a bridge that is up returns a tree.
+ *
+ * Never triggers recovery, being what recovery uses to judge itself, so it
+ * cannot recurse into the code that calls it.
+ */
+async function accessibilityIsAnswering(udid: string): Promise<boolean> {
+  try {
+    const frame = await companions.withClient(udid, async (client) => {
+      const info = (await client.accessibilityInfo({
+        format: Format.NESTED,
+      })) as AXElement[] | AXElement | null;
+      if (info == null) return null;
+      const root = Array.isArray(info) ? info[0] : info;
+      return root?.frame ?? null;
+    });
+    return !!frame && !!(frame.width && frame.height);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether a *point* read answers, which is a different question.
+ *
+ * Used only to tell a simulator that is still booting from one whose tree has
+ * gone empty: the second answers point queries while returning nothing for the
+ * screen, and the first answers neither.
+ */
+async function accessibilityPointAnswers(udid: string): Promise<boolean> {
+  try {
+    const element = (await companions.withClient(udid, (client) =>
+      client.accessibilityInfo({
+        point: { x: 100, y: 100 },
+        format: Format.LEGACY,
+        keys: DESCRIBE_KEYS,
+      })
+    )) as AXElement | null;
+    return !!element?.frame && !!(element.frame.width || element.frame.height);
+  } catch {
+    return false;
+  }
+}
+
+/** Milliseconds since this simulator's bridge was last restarted. */
+function msSinceRecovery(udid: string): number {
+  const last = lastRecoveryAt.get(udid);
+  return last === undefined ? Number.POSITIVE_INFINITY : Date.now() - last;
+}
+
+/**
+ * Restarts the wedged bridge and reports whether the simulator answers again.
+ *
+ * Deduplicated and rate-limited per simulator: several tools failing at once —
+ * which is what a wedge looks like from the outside — share a single restart
+ * rather than each ordering their own.
+ */
+async function recoverWedgedAccessibility(udid: string): Promise<boolean> {
+  const inFlight = recoveryInFlight.get(udid);
+  if (inFlight) return inFlight;
+
+  const since = msSinceRecovery(udid);
+  if (since < RECOVERY_COOLDOWN_MS) {
+    vlog(
+      `simulator ${udid} still not answering ${Math.round(since / 1000)}s after ` +
+        `a bridge restart; not restarting again`
+    );
+    return false;
+  }
+
+  const attempt = (async () => {
+    vlog(`simulator ${udid} stopped answering accessibility; restarting ${BRIDGE_SERVICE}`);
+    try {
+      await restartSimulatorBridge(udid);
+    } catch (error) {
+      vlog(`bridge restart for ${udid} failed: ${toError(error).message}`);
+      return false;
+    }
+    const started = Date.now();
+    const deadline = started + RECOVERY_PROBE_TIMEOUT_MS;
+    let recovered = false;
+    do {
+      await new Promise((resolve) =>
+        setTimeout(resolve, RECOVERY_PROBE_INTERVAL_MS)
+      );
+      recovered = await accessibilityIsAnswering(udid);
+    } while (!recovered && Date.now() < deadline);
+
+    const took = Math.round((Date.now() - started) / 1000);
+    vlog(
+      recovered
+        ? `simulator ${udid} recovered ${took}s after restarting ${BRIDGE_SERVICE}`
+        : `simulator ${udid} did not recover within ${took}s of restarting ${BRIDGE_SERVICE}`
+    );
+    return recovered;
+  })();
+
+  lastRecoveryAt.set(udid, Date.now());
+  recoveryInFlight.set(udid, attempt);
+  try {
+    return await attempt;
+  } finally {
+    recoveryInFlight.delete(udid);
+    // Time the cooldown from when the attempt finished, not from when it
+    // started, so the ~5s restart itself is not counted against it.
+    lastRecoveryAt.set(udid, Date.now());
+  }
+}
+
+/**
+ * Runs an accessibility read, curing a wedged bridge underneath it.
+ *
+ * The wedge — a simulator that renders, taps and answers `describe` while every
+ * accessibility read fails forever — was previously only recovered during boot,
+ * and only `ui_describe_all` and `ui_view` did anything about it afterwards.
+ * Everything else returned a better-worded error and left the session dead:
+ * `ui_tap`, `ui_find`, `ui_type`, `ui_swipe` and `ui_describe_point` all failed
+ * with advice to call a *different* tool. Wrapping the reads themselves means
+ * every tool is recovered by the same code, and none of them has to know.
+ *
+ * Only for a simulator that has answered before, and only for the one error
+ * that a restart cures — see `shouldRecover` for why both gates matter. Cure
+ * once, then a handful of attempts at the caller's read; a wedge that outlives
+ * that is reported rather than retried around.
+ */
+async function withAccessibilityRecovery<T>(
+  udid: string,
+  read: () => Promise<T>
+): Promise<T> {
+  try {
+    return await read();
+  } catch (error) {
+    const decided = shouldRecover({
+      answered: hasAnsweredAccessibility.has(udid),
+      message: toError(error).message,
+      msSinceLastAttempt: msSinceRecovery(udid),
+      cooldownMs: RECOVERY_COOLDOWN_MS,
+    });
+    if (!decided) throw error;
+    if (!(await recoverWedgedAccessibility(udid))) throw error;
+
+    let lastError = error;
+    for (let attempt = 0; attempt < POST_RECOVERY_READ_ATTEMPTS; attempt++) {
+      await new Promise((resolve) =>
+        setTimeout(resolve, POST_RECOVERY_READ_DELAY_MS)
+      );
+      try {
+        return await read();
+      } catch (retryError) {
+        lastError = retryError;
+        // Anything other than the wedge is a real answer to the caller's
+        // request, and waiting longer will not change it.
+        if (!isWedgeError(toError(retryError).message)) throw retryError;
+      }
+    }
+    throw lastError;
+  }
+}
+
+/**
  * Blocks until CoreSimulator reports the device has finished booting.
  *
  * A real signal instead of a guess: `simctl bootstatus` is documented to
@@ -755,6 +1040,9 @@ async function waitUntilDriveable(
         return root?.frame ?? null;
       });
       if (frame && frame.width && frame.height) {
+        // From here on, a failed read is a regression rather than a wait, so
+        // the shared recovery path is allowed to act on it.
+        markAccessibilityAnswered(udid);
         return {
           ready: true,
           waitedMs: Date.now() - started,
@@ -968,6 +1256,7 @@ if (!isToolFiltered("destroy_simulator")) {
         }
 
         managedSimulators.delete(id);
+        forgetSimulator(udid);
 
         return {
           isError: false,
@@ -1103,16 +1392,22 @@ if (!isToolFiltered("ui_describe_all")) {
       handleToolError("Error describing all of the ui", async () => {
         const sim = getManagedSim(id);
 
-        const elements = await describeScreen(sim.udid);
-        const screenFrame = elements[0]?.frame;
+        let elements = await describeScreen(sim.udid);
         if (isDegenerateTree(elements)) {
-          // describeAll restarts a wedged companion and retries; reaching a
-          // degenerate tree through that means something it cannot fix.
-          await describeAll(sim.udid);
-          throw new Error(await diagnoseEmptyAccessibilityTree(sim.udid));
+          // `describeAll` carries the whole ladder of cures — restart our
+          // companion, then the simulator's bridge — so run it, and ask again
+          // if it brings the screen back. Returning the screen beats returning
+          // an error that tells the caller to retry the call themselves.
+          if (!isDegenerateTree(await describeAll(sim.udid))) {
+            elements = await describeScreen(sim.udid);
+          }
+          if (isDegenerateTree(elements)) {
+            throw new Error(await diagnoseEmptyAccessibilityTree(sim.udid));
+          }
         }
 
         // Cache screen dimensions so subsequent tap/swipe/describe_point avoid an extra call
+        const screenFrame = elements[0]?.frame;
         if (screenFrame) {
           cacheScreenDims(sim, screenFrame);
         }
