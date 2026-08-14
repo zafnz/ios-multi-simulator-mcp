@@ -160,6 +160,7 @@ All tools take a required `id` (session identifier) parameter.
 | `start_simulator` | `type?` (e.g. "iPhone", "iPad", "iPhone 16 Pro") | Creates, boots, and opens a simulator for the session |
 | `destroy_simulator` | — | Shuts down and deletes the session's simulator |
 | `attach_simulator` | `udid` | Attaches to an existing booted simulator by UDID |
+| `rotate` | `orientation` (`portrait`, `landscape_left`, `landscape_right`, `upside_down`) | Rotates the device, then reports the orientation the interface actually adopted |
 | `detect_rotation` | — | Detects device rotation and updates coordinate mapping |
 | `ui_find` | `label` | Finds one element by accessibility label, without fetching the screen |
 | `ui_tap` | `label?`, `x?`, `y?`, `duration?` | Tap an element by label, or at coordinates |
@@ -270,6 +271,19 @@ would produce wrong-but-plausible results instead of a clean failure. Details in
 so they don't align once rotated. Navigate with `ui_tap { label }` or
 `ui_describe_all` instead; both use logical coordinates, and both cost fewer
 tokens anyway.
+
+**"I asked for `landscape_left` and the app says `landscapeRight`"** — both are
+right. UIKit has two orientation vocabularies and crosses them deliberately:
+`UIInterfaceOrientationLandscapeLeft` *is* `UIDeviceOrientationLandscapeRight`,
+"because rotating the device to the left requires rotating the content to the
+right". `rotate` and `detect_rotation` name the **device**, the same way the
+Simulator's own Device > Orientation menu does; an app reading its own
+`interfaceOrientation` will report the mirror word for the two landscapes.
+
+**`rotate: "upside_down"` appears to do nothing on an iPhone** — the device does
+turn, but no Face ID iPhone gives an app an upside-down interface, whatever its
+`Info.plist` says. `rotate` tells you so, and reports the orientation the
+interface actually kept. Use an iPad if you need that case.
 
 For everything else, see [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 

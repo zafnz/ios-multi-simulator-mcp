@@ -283,7 +283,13 @@ never declared as a dependency — in the repository it resolved through
 
 ## 2.0.3 candidates
 
-- [ ] **#26 rotation tool — naming settled 2026-08-14, tool not built.** `HIDOrientation` is in the proto with all four orientations, wired into the `HIDEvent` oneof, and already in our generated client, so the tool itself is small. The blocker was what the names mean, and that is now answered.
+- [x] **#26 DONE 2026-08-14 — `rotate` shipped.** Takes the four names, rotates over `HIDEvent.orientation`, waits out the animation, then **detects the orientation and reports what it found rather than what was asked for**. That last part is not politeness: it caught a real bug in this very tool during its first run, and it is what a caller needs when an app declines an orientation.
+  - **idb's `HIDOrientationType` uses UIKit's *interface* vocabulary; ours names the device.** The first mapping was name-for-name, and the fixture exposed it immediately: `rotate landscape_left` produced `device=landscapeRight interface=landscapeLeft` — the mirror — and the tool answered *"asked for landscape_left, the interface is landscape_right"*. `HID_ORIENTATION` now crosses the two landscapes deliberately. Retested after the fix: all four requests land on the right device orientation, and a tap at (776.5, 46) from the resulting landscape tree hit `Nav Button`.
+  - **Upside down behaves exactly as documented below.** `rotate upside_down` on an iPhone moves the device (`device=portraitUpsideDown`) while the interface stays put, and the tool says so, names the Face ID cause, and points at iPad.
+  - **TESTING_TOOLS.md Part 2 is now agent-drivable end to end** — step #26 was the only manual step in the file.
+  - Also fixed while here: CLAUDE.md's tool list still advertised `get_booted_sim_id` and `open_simulator`, which this fork does not have.
+
+- [x] **#26-orig rotation tool — naming settled 2026-08-14, tool not built.** `HIDOrientation` is in the proto with all four orientations, wired into the `HIDEvent` oneof, and already in our generated client, so the tool itself is small. The blocker was what the names mean, and that is now answered.
   - **We match the Simulator's own vocabulary, in both of its menus.** Measured against a human driving the menu, with a tap by coordinate each time to prove the transform and not just the label:
 
     | menu action | `detect_rotation` | tap from that tree |

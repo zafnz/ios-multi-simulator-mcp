@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+### New tool: `rotate`
+
+Rotates the device — `portrait`, `landscape_left`, `landscape_right`,
+`upside_down` — and then **reads the orientation back and reports what the
+interface actually adopted**, which is not always what was asked for.
+
+Two things make that worth doing rather than reporting success:
+
+- **An app can decline.** No Face ID iPhone gives an app an upside-down
+  interface, whatever its `Info.plist` says. `rotate upside_down` there turns
+  the device, leaves the interface where it was, and says so — naming the cause
+  and pointing at iPad — instead of leaving the caller to wonder.
+- **It caught a bug in itself.** idb's orientation enum turns out to use UIKit's
+  *interface* vocabulary while ours names the device, and UIKit crosses the two
+  landscapes on purpose. The first mapping was name-for-name, and the read-back
+  reported the mirror image immediately rather than silently inverting every
+  coordinate that followed.
+
+Orientation names follow the **device**, exactly as the Simulator's own
+Device > Orientation menu does. An app reporting
+`UIInterfaceOrientationLandscapeRight` is in `landscape_left` here; both are
+correct, and the README says why.
+
+This also makes TESTING_TOOLS.md Part 2 runnable by an agent — rotating the
+device was previously the one step in the whole plan that needed a human.
+
 ### Every tool recovers a wedged simulator, not two of them
 
 A simulator can render, respond to taps and answer `describe` while every

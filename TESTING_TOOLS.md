@@ -255,9 +255,13 @@ ui_describe_all(id: "landscape-test")
 
 ### #26 Rotate to landscape
 
-**Manual step:** In the Simulator app, use **Device > Rotate Left** (or Cmd+Left Arrow).
+```
+rotate(id: "landscape-test", orientation: "landscape_left")
+```
 
-> No MCP client can perform this — no rotation tool is exposed. A human must do it, or Part 2 must be run by hand.
+**Expected:** `Rotated to "landscape_left" for session "landscape-test".` — the tool rotates the device and then reads the orientation back, so this wording means the interface actually adopted it. A reply of the form *"Asked the device to rotate to X, but the interface is Y"* is a real answer too, not an error: the app declined, and coordinates follow Y.
+
+> This used to be a manual step, and Part 2 could not be run by an agent at all. Doing it by hand still works — **Device > Rotate Left** — and should give the same result, which is worth checking occasionally since it is the ground truth the tool is imitating.
 
 ### #27 detect_rotation
 
@@ -402,6 +406,7 @@ All tools tested:
 | `start_simulator` | #1, #21, #23 |
 | `destroy_simulator` | #21, #22, #34 |
 | `attach_simulator` | #21 |
+| `rotate` | #26 |
 | `detect_rotation` | #27 |
 | `ui_describe_all` | #3, #10, #25, #29 |
 | `ui_find` | #11, #12, #13, #15, #30, #32, #33 |

@@ -91,11 +91,16 @@ The server:
 
 ## Available MCP Tools
 
-The server provides these tools (can be filtered via environment variables):
-- `get_booted_sim_id` - Get the currently booted simulator ID
-- `open_simulator` - Open the iOS Simulator application
+The server provides these tools (can be filtered via environment variables).
+Every one takes an `id` naming the session, which owns one simulator:
+- `start_simulator` - Create, boot and open a simulator for the session
+- `destroy_simulator` - Shut down and delete it (or merely detach, if attached)
+- `attach_simulator` - Adopt an already-booted simulator by UDID
+- `rotate` - Rotate the device, then report the orientation the interface adopted
+- `detect_rotation` - Probe the current orientation and update the coordinate mapping
 - `ui_describe_all` - Get accessibility info for the entire screen
-- `ui_tap` - Tap at coordinates
+- `ui_find` - Resolve one element by label or visible text
+- `ui_tap` - Tap by label, or at coordinates
 - `ui_type` - Input text
 - `ui_swipe` - Swipe gesture
 - `ui_describe_point` - Get element at specific coordinates

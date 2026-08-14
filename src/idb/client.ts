@@ -18,6 +18,7 @@ import {
   HIDEvent,
   HIDEvent_HIDButtonType,
   HIDEvent_HIDDirection,
+  HIDEvent_HIDOrientationType,
   TargetDescription,
 } from "./generated/idb";
 import { HID_KEY_SHIFT, KEY_MAP, unmappedCharacters } from "./keymap";
@@ -27,6 +28,7 @@ export {
   AccessibilityInfoRequest_Format as Format,
   AccessibilityActionRequest_SearchableKey as SearchableKey,
   HIDEvent_HIDButtonType as Button,
+  HIDEvent_HIDOrientationType as OrientationType,
 };
 
 /**
@@ -202,6 +204,22 @@ export class IdbClient {
       press(action, HIDEvent_HIDDirection.DOWN),
       ...(duration ? [HIDEvent.fromPartial({ delay: { duration } })] : []),
       press(action, HIDEvent_HIDDirection.UP),
+    ]);
+  }
+
+  /**
+   * Rotates the device, as the Simulator's own Device > Orientation menu does.
+   *
+   * Sending the request is all this does. Whether the *app* follows the device
+   * is the app's decision and iOS's — a Face ID iPhone never adopts
+   * upside-down portrait however the fixture's Info.plist is written — so the
+   * caller must read the orientation back rather than assume it took.
+   */
+  async setOrientation(
+    orientation: HIDEvent_HIDOrientationType
+  ): Promise<void> {
+    await this.sendHidEvents([
+      HIDEvent.fromPartial({ orientation: { orientation } }),
     ]);
   }
 

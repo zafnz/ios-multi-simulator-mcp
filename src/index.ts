@@ -11,7 +11,7 @@ import os from "os";
 import fs from "fs";
 import http from "http";
 import { companions } from "./idb/companionManager";
-import { Backend, Format, SearchableKey } from "./idb/client";
+import { Backend, Format, OrientationType, SearchableKey } from "./idb/client";
 import {
   AXElement,
   DESCRIBE_KEYS,
@@ -431,6 +431,43 @@ async function cleanupAllSimulators(): Promise<void> {
   );
   managedSimulators.clear();
 }
+
+/**
+ * Our orientation names to idb's `HIDOrientationType`.
+ *
+ * **The landscapes are crossed on purpose, and this is the whole subtlety of
+ * the rotate tool.** Both enums spell the same four words, but they mean
+ * different things by them: ours names the *device*, as the Simulator's own
+ * menus do, while idb's turns out to use UIKit's *interface* vocabulary — and
+ * UIKit defines `UIInterfaceOrientationLandscapeLeft` as
+ * `UIDeviceOrientationLandscapeRight` (see `src/ax/orientation.ts`).
+ *
+ * Measured, not assumed. A name-for-name map was written first and the fixture
+ * caught it immediately: asking for `landscape_left` produced an app reporting
+ * `device=landscapeRight interface=landscapeLeft`, i.e. the mirror image, and
+ * `rotate` duly answered "you asked for landscape_left, the interface is
+ * landscape_right". Reading the orientation back rather than trusting the
+ * request is what turned a silently inverted coordinate space into a visible
+ * disagreement, and is worth keeping for that reason alone.
+ */
+const HID_ORIENTATION: Record<
+  "portrait" | "upside_down" | "landscape_left" | "landscape_right",
+  OrientationType
+> = {
+  portrait: OrientationType.PORTRAIT,
+  upside_down: OrientationType.PORTRAIT_UPSIDE_DOWN,
+  landscape_left: OrientationType.LANDSCAPE_RIGHT,
+  landscape_right: OrientationType.LANDSCAPE_LEFT,
+};
+
+/**
+ * How long to let a rotation animate before reading the tree.
+ *
+ * The accessibility tree reports the old geometry until the rotation finishes,
+ * so reading too early returns the orientation we were in rather than the one
+ * we asked for.
+ */
+const ROTATION_SETTLE_MS = 1_500;
 
 // --- Coordinate transformation ---
 
@@ -1341,6 +1378,67 @@ if (!isToolFiltered("attach_simulator")) {
                       `user to file a bug at https://github.com/zafnz/ios-multi-simulator-mcp/issues with the ` +
                       `simulator UDID and this message.`
                     : `Poll ui_view until it returns a screenshot.`),
+            },
+          ],
+        };
+      })
+  );
+}
+
+if (!isToolFiltered("rotate")) {
+  server.tool(
+    "rotate",
+    "Rotates the simulated device. Orientation names follow the device, exactly as the Simulator's own Device > Orientation menu does: rotating the device left is `landscape_left`. Note that UIKit's *interface* orientation names are the mirror of these for the two landscapes, so an app reporting `UIInterfaceOrientationLandscapeRight` is in `landscape_left` here — both are correct. Reads the orientation back afterwards and reports what the interface actually adopted, which is not always what was asked for.",
+    {
+      id: sessionIdSchema,
+      orientation: z
+        .enum(["portrait", "upside_down", "landscape_left", "landscape_right"])
+        .describe("The orientation to rotate the device to"),
+    },
+    { title: "Rotate Device", readOnlyHint: false, openWorldHint: true },
+    async ({ id, orientation }) =>
+      handleToolError("Error rotating the device", async () => {
+        const sim = getManagedSim(id);
+
+        await companions.withClient(sim.udid, (client) =>
+          client.setOrientation(HID_ORIENTATION[orientation])
+        );
+
+        // Rotation is animated, and the accessibility tree reports the old
+        // geometry until it finishes.
+        await new Promise((resolve) => setTimeout(resolve, ROTATION_SETTLE_MS));
+
+        // Detected, not assumed. An app is free to decline an orientation --
+        // and one always does: no Face ID iPhone will adopt upside-down
+        // portrait, whatever its Info.plist says. Reporting the request back as
+        // if it had been obeyed would leave every later coordinate wrong.
+        sim.screenDims = null;
+        const detected = await detectOrientation(sim.udid);
+        sim.orientation = detected;
+
+        if (detected === orientation) {
+          return {
+            isError: false,
+            content: [
+              { type: "text", text: `Rotated to "${detected}" for session "${id}".` },
+            ],
+          };
+        }
+
+        const why =
+          orientation === "upside_down"
+            ? " An iPhone with Face ID never gives an app an upside-down interface, so this is expected there; use an iPad if you need that orientation."
+            : " The app may not support that orientation.";
+
+        return {
+          isError: false,
+          content: [
+            {
+              type: "text",
+              text:
+                `Asked the device to rotate to "${orientation}", but the interface is "${detected}".` +
+                why +
+                ` Coordinates now follow "${detected}".`,
             },
           ],
         };
