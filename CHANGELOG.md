@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 2.1.0
+
+Adds device rotation, makes every tool recover a wedged simulator rather than
+two of them, and puts the first unit tests on the logic that decides where a tap
+lands.
 
 ### New tool: `rotate`
 
@@ -66,7 +70,7 @@ output are identical.
 
 The pure logic — accessibility tree pruning, label matching, coordinate
 transforms — moved out of `src/index.ts` into `src/ax/` and gained unit tests
-(`npm test`, 62 assertions, well under a second). It could not be tested where
+(`npm test`, 75 assertions, well under a second). It could not be tested where
 it was, because `src/index.ts` starts a server on import. These rules were
 previously verified by booting simulators, at roughly three minutes an attempt.
 
