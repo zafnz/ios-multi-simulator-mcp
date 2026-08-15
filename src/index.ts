@@ -1649,7 +1649,7 @@ async function toggleElement(
   udid: string,
   element: AXElement,
   label: string
-): Promise<{ isError: false; content: { type: "text"; text: string }[] }> {
+): Promise<{ isError: false; content: { type: "text"; text: string }[] } | null> {
   const before = element.AXValue;
   const name = typeof element.AXLabel === "string" ? element.AXLabel : label;
 
@@ -1660,17 +1660,37 @@ async function toggleElement(
   const id = element.AXUniqueId;
   const useId = typeof id === "string" && id.length > 0;
 
-  await withAccessibilityRecovery(udid, () =>
-    companions.withClient(
-      udid,
-      (client) =>
-        client.activate(
-          useId ? id : name,
-          useId ? SearchableKey.UNIQUE_ID : SearchableKey.LABEL
-        ),
-      { exclusive: true }
-    )
-  );
+  try {
+    await withAccessibilityRecovery(udid, () =>
+      companions.withClient(
+        udid,
+        (client) =>
+          client.activate(
+            useId ? id : name,
+            useId ? SearchableKey.UNIQUE_ID : SearchableKey.LABEL
+          ),
+        { exclusive: true }
+      )
+    );
+  } catch (error) {
+    // The action API cannot reach every element the tree can.
+    //
+    // `AccessibilityActionRequest` has no `backend` field, where the read
+    // request does — so a lookup can fall back to AXBridge and an *action*
+    // cannot. Anything only that backend can see is therefore findable and not
+    // activatable: a switch in a toolbar or nav bar, or one inside a sheet
+    // drawn by another process.
+    //
+    // Handing the tap back rather than failing, because this is exactly the
+    // case where a coordinate works: such a switch was reachable by name until
+    // toggles started being activated instead of touched, and its frame was
+    // the control all along. The caller's tap then goes through the ordinary
+    // path, hold and hit-test verification included, so if the centre turns
+    // out not to be the control they get the honest refusal rather than a
+    // touch into empty space.
+    if (!/found no element/i.test(toError(error).message)) throw error;
+    return null;
+  }
 
   // Read it back rather than assuming it flipped — by identifier where there is
   // one, because a label is a substring and the screen has just changed. An app
@@ -1803,21 +1823,26 @@ if (!isToolFiltered("ui_tap")) {
           }
 
           if (isToggle(element)) {
-            // A toggle is operated, not touched.
+            // A toggle is operated, not touched — where it can be. A null back
+            // means the action API could not reach this one, and the tap below
+            // is the right answer for it; see `toggleElement`.
             if (duration === undefined && count === 1) {
-              return await toggleElement(sim.udid, element, label);
+              const toggled = await toggleElement(sim.udid, element, label);
+              if (toggled) return toggled;
+            } else {
+              // A hold or a double-tap can only be a real touch, and a real
+              // touch aimed at a toggle's centre lands nowhere — the frame
+              // spans the row and the control is off to one side. Rather than
+              // deliver a gesture that cannot work and report success, say so:
+              // this was measured doing exactly that, silently, before the
+              // check existed.
+              throw new Error(
+                `"${name}" is a toggle, and ${duration !== undefined ? "a hold" : "a multi-tap"} ` +
+                  `cannot be delivered to one by name: its frame spans the whole row, so the ` +
+                  `centre is not the control. Call ui_tap {label} with no ${duration !== undefined ? "duration" : "count"} ` +
+                  `to switch it, or read the control's position from ui_view and use ui_tap {x, y}.`
+              );
             }
-            // A hold or a double-tap can only be a real touch, and a real touch
-            // aimed at a toggle's centre lands nowhere — the frame spans the
-            // row and the control is off to one side. Rather than deliver a
-            // gesture that cannot work and report success, say so: this was
-            // measured doing exactly that, silently, before the check existed.
-            throw new Error(
-              `"${name}" is a toggle, and ${duration !== undefined ? "a hold" : "a multi-tap"} ` +
-                `cannot be delivered to one by name: its frame spans the whole row, so the ` +
-                `centre is not the control. Call ui_tap {label} with no ${duration !== undefined ? "duration" : "count"} ` +
-                `to switch it, or read the control's position from ui_view and use ui_tap {x, y}.`
-            );
           }
 
           const centre = centreOf(element);

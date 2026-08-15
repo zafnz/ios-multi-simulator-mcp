@@ -201,8 +201,24 @@ static NSString *DeviceOrientationName(UIDeviceOrientation o) {
                                       identifier:@"ToolbarField"];
   self.toolbarField.frame = CGRectMake(0, 0, 200, 32);
 
+  // A toggle the cheap backend cannot see, which is the combination nothing
+  // else in this fixture covers: `ui_find` reaches it through the AXBridge
+  // fallback, but the accessibility *action* API has no backend selector, so
+  // the activation `ui_tap {label}` uses for a toggle cannot reach it at all.
+  // Toolbar switches are unusual; the same shape turns up wherever a switch
+  // lives somewhere the default tree walk misses — system chrome, or a sheet
+  // drawn by another process.
+  UISwitch *toolbarSwitch = [[UISwitch alloc] init];
+  toolbarSwitch.accessibilityLabel = @"Toolbar Switch";
+  toolbarSwitch.accessibilityIdentifier = @"ToolbarSwitch";
+  [toolbarSwitch addTarget:self
+                    action:@selector(toolbarSwitchChanged:)
+          forControlEvents:UIControlEventValueChanged];
+
   self.toolbarItems = @[
     toolbarButton,
+    [UIBarButtonItem flexibleSpaceItem],
+    [[UIBarButtonItem alloc] initWithCustomView:toolbarSwitch],
     [UIBarButtonItem flexibleSpaceItem],
     [[UIBarButtonItem alloc] initWithCustomView:self.toolbarField],
   ];
@@ -448,6 +464,11 @@ static NSString *DeviceOrientationName(UIDeviceOrientation o) {
 // higher up the screen it wins, so the second lookup of a control resolves the
 // sentence describing the first. Observed: one toggle by name worked, and the
 // next tapped the status label instead. "settings toggle" collides with nothing.
+- (void)toolbarSwitchChanged:(UISwitch *)sender {
+  [self report:[NSString stringWithFormat:@"toolbar toggle = %@",
+                                          sender.isOn ? @"on" : @"off"]];
+}
+
 // Never expected to run. If it does, a disabled control was activated.
 - (void)disabledButtonTapped {
   [self report:@"disabled button fired"];

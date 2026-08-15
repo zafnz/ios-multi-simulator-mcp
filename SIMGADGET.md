@@ -6,6 +6,8 @@
 > proposal to argue with.
 
 Sketched 2026-08-15, from a survey of what the MCP layer actually contributes.
+Reviewed the same day: facts checked against the repo and the registry, the
+open questions answered inline, and the phase-1 sequencing corrected.
 
 ## What we would be trying to do
 
@@ -34,6 +36,11 @@ current companion (see below), and that is the whole argument.
 Base name is the library, `-mcp` is the integration. Nobody types an MCP config
 by hand, so `npx simgadget-mcp` costs its users nothing, and the plain name is
 worth more attached to the thing people `npm install`.
+
+Both names were free on npm as of 2026-08-15, and `npm search simgadget` finds
+nothing at all. **Reserve both with placeholder publishes before this plan is
+visible anywhere public** — npm's name-dispute process is slow and the names are
+squattable the moment they appear in a repo.
 
 ### Why not one package with two entry points
 
@@ -70,10 +77,21 @@ It is also the part of the rename most likely to break, in two ways.
 https://github.com/zafnz/ios-multi-simulator-mcp/releases/download/companion-da0f89a-xcode26.6/...
 ```
 
-GitHub redirects release assets after a repo rename, so this survives the rename
-itself. The redirect dies the moment anything is created at the old path —
-including by us, including by accident. **Re-cut the release under the new name
-and update the lockfile before anything else moves.**
+Releases and their assets move with a renamed repo, and GitHub redirects the
+old URL, so this survives the rename itself. There is no re-cutting to do — and
+no way to do it "before anything else moves": a release cannot be created under
+`zafnz/simgadget` before that repo exists. The right order is the reverse of
+the obvious one: **rename the repo first, then update the lockfile URL to the
+new canonical path**, so nothing of ours depends on the redirect.
+
+The redirect still matters, permanently. Every already-published version of
+`ios-multi-simulator-mcp` (2.1.1 is live on npm) carries the old-path URL baked
+into its lockfile, and those installs download through the redirect for as long
+as anyone runs them. The redirect dies the moment anything is created at the
+old path — including by us, including by accident. So "never recreate
+`ios-multi-simulator-mcp` under this account" is not a transition-week rule; it
+is a standing one, and it belongs in `CLAUDE.md` where a future session will
+see it before helpfully reusing the name.
 
 ### It is arm64-only
 
@@ -85,25 +103,18 @@ is the worst available outcome. The decision is to **fail loudly at resolve
 time** — an explicit unsupported-architecture error naming the arch, not a
 confusing gRPC timeout thirty seconds later.
 
-Two things bear on whether that stays permanent, neither of which needs an
-Intel Mac on the desk:
+**Answered (2026-08-15): Xcode 26 does run on Intel.** Apple ships it as a
+Universal build (alongside a separate Apple-Silicon-only build since beta 5),
+and macOS 26 Tahoe supports a handful of Intel Macs. It is Xcode 27 that drops
+Intel entirely. So an Intel user on Xcode 26.6 can exist — but the audience is
+four Mac models on the final Intel-supporting OS, with a published expiry date.
 
-- **`macos-13` GitHub Actions runners are real Intel hardware**, free, and are
-  the only realistic way to test an x86_64 slice without owning one. The
-  constraint is the Xcode they carry, which is nowhere near 26.6 — so this can
-  test *a* companion on Intel, not *this* companion.
-- **Rosetta on Apple Silicon can build and smoke-test an x86_64 slice**
-  (`arch -x86_64`), confirming it loads, links and binds its socket. It does not
-  confirm it can drive a simulator on Intel: here the runtime is arm64 and the
-  cross-architecture path is not the one an Intel user would take. A pass proves
-  very little. A failure proves something.
-
-**Open question, and it may delete this whole section: does Xcode 26 run on
-Intel Macs at all?** macOS 26 Tahoe was announced as the last Intel-supporting
-release, and if the toolchain the lockfile pins cannot be installed on Intel,
-then no Intel user can be in a position to want this and "fail loudly" is simply
-correct. Worth ten minutes with Apple's release notes before spending anything
-on x86_64.
+The decision stands: fail loudly, permanently, and spend nothing on x86_64.
+That includes the two testing ideas previously sketched here — `macos-13`
+GitHub Actions runners (real Intel, but cannot carry Xcode 26.6, so they test
+*a* companion rather than *this* one) and Rosetta smoke tests (`arch -x86_64`
+proves the slice loads, not that it drives a simulator on hardware we do not
+have). Both are misleading reassurance about a build nobody would run.
 
 ## Layout
 
@@ -131,7 +142,9 @@ in exchange nobody ever reasons about version skew.
 The single-file rule in `CLAUDE.md` was written when there was one product. It
 should be re-cut rather than defended, but one half of it is still load-bearing.
 
-`index.ts` is 2757 lines in three natural pieces:
+`index.ts` is ~3000 lines and growing (2757 when this table was measured; the
+ranges below drift with every commit and are a sketch of the seams, not an
+implementation map). Three natural pieces:
 
 | Lines | What | Goes to |
 |---|---|---|
@@ -147,15 +160,21 @@ diagnoses an empty one — already exists. It is trapped in `index.ts` because
 there was only ever one file to put it in. Moving it is most of what makes the
 library worth publishing, and almost none of it is new code.
 
+One gap the table hides: the *input* side — tap, swipe, type — lives inline in
+the tool registration bodies, not in named functions. A read-only library is
+not the product; extracting those into library ops is the one piece of
+genuinely new code the split requires.
+
 The tool registrations stay together, side by side, for the reason the original
 rule gave: they are repetitive and they read better in one place. That half of
 the rule survives. What dies is "everything lives in one file".
 
-(`CLAUDE.md` says 16 tool registrations. There are 17.)
+(`CLAUDE.md` says 16 tool registrations. There are 17 — verified by count,
+2026-08-15.)
 
 ## Before the first publish
 
-Publishing converts a free-to-change surface into a semver commitment. Two
+Publishing converts a free-to-change surface into a semver commitment. Five
 things should not be frozen as they stand:
 
 - **`IdbClient.accessibilityInfo()` returns `Promise<unknown>`.** It is the
@@ -164,7 +183,43 @@ things should not be frozen as they stand:
   `uniquelyLabelled`, `reconcileType`, `HIT_SLOP`, `DESCRIBE_KEYS`. They are
   `export`ed only because `index.ts` is a separate compilation unit, not because
   anyone should call them. Everything exported on the day of publication is
-  owned forever.
+  owned forever. Do not rely on documentation to hide them: a `package.json`
+  `"exports"` map makes internals *unresolvable*, which is the only kind of
+  private that survives contact with users.
+- **The first call downloads 19 MB.** For an MCP server that is a startup
+  detail; for a library it is a surprising side effect — CI blocks on a GitHub
+  download mid-test, offline environments fail at an unpredictable moment, and
+  nothing reports progress. `COMPANION_PATH`/`COMPANION_CACHE` already give an
+  escape hatch, but the library wants an explicit prefetch call (and probably a
+  `npx simgadget prefetch` for CI images), and the behaviour documented on the
+  same first screen of the README that advertises the companion.
+- **`companionManager.ts` installs a `process.on("exit")` handler** on first
+  spawn. It reaps *companions*, never simulators — a script's simulator keeps
+  running, with all its state, after the script exits; only the helper process
+  dies. That stays correct in the library, because socket paths embed the pid
+  and generation (`${udid}.${pid}.${generation}.sock`): no later process can
+  discover or reconnect to a surviving companion, so leaving one alive gains
+  nothing and leaks a process per script run until `--idle-shutdown-time`
+  (3600s) reaps it. Keep the hook, but rewrite its header in host-agnostic
+  terms (it currently justifies itself by *this server's* signal handlers),
+  document it, and expose `shutdown()` — `'exit'` never fires when the host
+  dies to an unhandled signal, so the hook is a backstop, not a guarantee.
+  The consequence for the short-script workflow: each run pays a companion
+  spawn (~0.5s bind, longer on a cold simulator). If that ever matters, the
+  answer is the HTTP server, which *is* the persistent-companion daemon;
+  cross-process companion reuse via stable socket paths is a real design with
+  real staleness hazards and is explicitly not in v1.
+- **Simulator lifecycle: verbs in, policy out.** The library gets the explicit
+  lifecycle calls — list, create, boot, shutdown, delete — because the
+  short-script user needs to boot something, and the hard-won knowledge
+  (newest-first devicetype ordering, latest-runtime lookup, and above all
+  `waitUntilDriveable` with its 0x0-tree boot detection from BOOT_BUG.md) lives
+  behind them. What stays out of the library is *implicit* lifecycle: nothing
+  in `simgadget` ever destroys a simulator except an explicit call. Ownership
+  tracking, sessions, and delete-what-we-created-on-exit are MCP-server policy
+  and remain in `simgadget-mcp`. Multi-simulator "support" in the library is
+  just functions keyed by udid — the session machinery that makes one server
+  drive many simulators for many agents is likewise all server-side.
 
 ## Rename scope
 
@@ -191,16 +246,28 @@ things should not be frozen as they stand:
   Renaming it orphans an already-downloaded 19 MB companion. Harmless, since the
   next run re-downloads and re-verifies, but users on metered connections deserve
   a line in the changelog.
+- **Search equity.** "ios simulator mcp" is literally what users type, and the
+  current name *is* the query; "simgadget" says nothing about iOS. Survivable —
+  npm keywords, a README title of the form "SimGadget — iOS simulator automation
+  for JS/TS and MCP", and the deprecated wrapper package all preserve the trail —
+  but it needs doing deliberately, not discovered from a download graph.
+  The offsetting gain: upstream `ios-simulator-mcp` (joshuayoes) is still
+  published, one word away from our name; a distinct name ends the
+  "is this the same thing?" confusion permanently.
 
 ## Sequencing
 
 Each phase ships on its own. As one commit this would be miserable to review and
 impossible to revert.
 
-1. **Re-cut the companion release** under the new name, update the lockfile.
-   Fragile, and unrelated to everything else.
-2. **Rename** repo, product, website, docs, env vars with fallback shim. No code
-   movement.
+0. **Reserve `simgadget` and `simgadget-mcp` on npm.** Minutes of work, and the
+   only step that gets harder the longer the plan is public.
+1. **Rename** repo, product, website, docs, env vars with fallback shim. No code
+   movement. (This must come first: the lockfile fix depends on the renamed
+   repo existing.)
+2. **Update `companion.lock.json`** to the renamed repo's canonical URL — the
+   release and its assets move with the repo, so there is nothing to re-cut —
+   and add the never-recreate-the-old-name rule to `CLAUDE.md`.
 3. **Workspaces split**, moving the high-level API into `simgadget`.
    `scripts/smoke-packed.sh` must pack *both* and verify the server resolves the
    library from the tarball rather than the workspace symlink — this is easy to
@@ -211,12 +278,14 @@ impossible to revert.
 6. **Rewrite `CLAUDE.md`** — Architecture, the single-file rule, and every env
    var in the docs.
 
-## Open questions
+## Open questions — all answered, 2026-08-15
 
-- Does Xcode 26 run on Intel Macs? If not, x86_64 is moot.
-- Is a `macos-13` runner with an older Xcode a useful x86_64 signal, or
-  misleading reassurance about a companion nobody would run?
-- Does the library want its own `SimGadget` facade class, or is a bag of
-  functions plus `IdbClient` the honest shape? The MCP server is currently the
-  only caller and it uses the functions directly.
-- `simgadget` on npm: available?
+- *Does Xcode 26 run on Intel Macs?* **Yes** — Universal build; Xcode 27 is the
+  one that drops Intel. Details in the arm64 section above. Fail-loudly stands.
+- *Is a `macos-13` runner a useful x86_64 signal?* **No** — it cannot carry
+  Xcode 26.6, so it is misleading reassurance. Also folded in above.
+- *Facade class or bag of functions?* **Functions.** A facade can be added in a
+  minor release; it can never be removed. The only real caller uses the
+  functions directly, and that is the honest shape to publish.
+- *`simgadget` on npm?* **Available**, as is `simgadget-mcp`. Reserve both now
+  (phase 0).

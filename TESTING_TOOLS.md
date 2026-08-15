@@ -498,7 +498,35 @@ The `(StaticText)` in that reply is the useful part: it says plainly that the na
 
 That is correct, not a bug, and it is here so nobody later "fixes" it. `Split Switch` is a label and a switch in a plain container with nothing merging them, so iOS publishes two elements: a static text carrying the name, and an unnamed switch beside it. The name genuinely refers to the text. A VoiceOver user meets the same wall and moves on to the switch. The rule the tools follow is that they operate what iOS says the element *is* — and no amount of activation makes a label into a control.
 
-### #47 A disabled control must refuse, not swallow the tap
+### #47 A toggle the action API cannot reach must still be tapped
+
+The fixture's toolbar carries a switch. It lives in system chrome, so the cheap
+backend cannot see it — and `AccessibilityActionRequest` has **no `backend`
+field**, where the read request does, so a lookup can fall back to AXBridge and
+an activation cannot.
+
+```
+ui_find(id: "toggle-test", label: "Toolbar Switch")
+ui_tap(id: "toggle-test", label: "Toolbar Switch")
+ui_find(id: "toggle-test", label: "status:")
+```
+
+**Expected:** the find returns the switch; the tap answers `Tapped "Toolbar Switch" (Switch) at (201, 822).` — a *tap*, not a toggle — and the status line reads `status: toolbar toggle = on`.
+
+Two failures to watch for, and they are opposite:
+
+- **`INTERNAL: The accessibility backend found no element ...`** is the regression this step exists for. It means the activation path failed and did not hand back to a touch, so `ui_find` and `ui_tap` now contradict each other about an element that is plainly there and plainly operable by coordinate.
+- **`Toggled Toolbar Switch ...`** would mean the action API has grown the reach it lacked — welcome news, worth checking `npm run check:companion` and simplifying this path, but not what today's idb does.
+
+Run it twice and confirm the status flips back, then check the ordinary toggle still activates:
+
+```
+ui_tap(id: "toggle-test", label: "Settings Switch")
+```
+
+**Expected:** `Toggled Settings Switch off -> on.` The two must not converge: `Settings Switch` is activated because its centre is not the control, `Toolbar Switch` is touched because it cannot be activated. A build where both report the same verb has lost one of the two mechanisms.
+
+### #48 A disabled control must refuse, not swallow the tap
 
 ```
 ui_find(id: "toggle-test", label: "Disabled Button")
@@ -520,7 +548,7 @@ ui_find(id: "toggle-test", label: "status:")
 
 A disabled control is worth its own step because its symptom is identical to every other kind of failed tap: the touch is delivered, nothing happens, and before this check the reply said success.
 
-### #48 A covered control must refuse, not tap something else
+### #49 A covered control must refuse, not tap something else
 
 The fixture's stepper sits below the fold, under the toolbar — its frame is perfectly correct, and its centre belongs to the toolbar's search field:
 
@@ -653,13 +681,13 @@ All tools tested:
 | Tool | Steps |
 |------|-------|
 | `start_simulator` | #1, #21, #23, #35, #43 |
-| `destroy_simulator` | #21, #22, #34, #42, #48 |
+| `destroy_simulator` | #21, #22, #34, #42, #49 |
 | `attach_simulator` | #21 |
 | `rotate` | #26 |
 | `detect_rotation` | #27 |
 | `ui_describe_all` | #3, #10, #25, #29 |
-| `ui_find` | #11, #12, #13, #15, #30, #32, #33, #37, #40, #45, #46, #47 |
-| `ui_tap` | #13, #14, #19, #30, #32, #33, #35, #39, #41, #44, #45, #46, #47, #48 |
+| `ui_find` | #11, #12, #13, #15, #30, #32, #33, #37, #40, #45, #46, #47, #48 |
+| `ui_tap` | #13, #14, #19, #30, #32, #33, #35, #39, #41, #44, #45, #46, #47, #48, #49 |
 | `ui_type` | #15, #33 |
 | `ui_swipe` | #5 |
 | `ui_describe_point` | #4, #16, #38 |
