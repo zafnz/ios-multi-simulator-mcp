@@ -656,7 +656,7 @@ time_tool ui_view           '{"id":"rtt"}'
 | Call | Order of magnitude |
 |---|---|
 | `ui_tap` by coordinate | **100–150 ms** — the 100 ms hold, plus the round trip |
-| `ui_tap` by label | ~145 ms — the above, plus the lookup and the hit-test that verifies it |
+| `ui_tap` by label | **150–200 ms** — the above, plus the lookup and the hit-test that verifies it |
 | `ui_describe_point` | under 50 ms |
 | `ui_find`, name present in the cheap tree | ~25 ms |
 | `ui_find`, name absent — falls back | ~300 ms |
@@ -669,6 +669,16 @@ Two things to check rather than exact figures:
 - **`ui_describe_point` is fast** — single digits on an idle machine, under 50 ms in any case. It scales with what else the machine is doing: a busy Mac was measured at 22 ms, with every other figure in the table up by the same factor.
   - **`ui_describe_point` is the one to watch, and this row has caught a real regression.** It is the only cheap tool that can quietly become an expensive one, because it falls back to a whole-screen read when a frame looks like it belongs to a remote-hosted view (Part 3). Get that condition wrong and every point read pays ~300 ms while still returning the right answer, so nothing fails — the number here is the only thing that notices. A measurement of ~300 ms means the fallback is firing on ordinary elements; `isRemotelyHosted` in [src/ax/tree.ts](src/ax/tree.ts) is the thing to look at. It was measured at 313 ms once, because a hit-test at x=200 returns the home screen's Health icon, whose frame ends at x=188.67.
 - **Anything reading the whole screen costs ~300 ms**, because it reads the app's real view hierarchy. A `ui_find` that misses pays the same, since it falls back to that read. This is the reason to tap by name rather than describing the screen and picking coordinates.
+
+**Measure against a screen that does not change.** Three of these tools alter what
+is on screen — tapping an app icon launches it, tapping a fixture button that
+navigates leaves the screen the next iteration is measured on. A loop that does
+that stops measuring what it claims to: a `ui_find` hit becomes a miss and reads
+~350 ms instead of ~20 ms, which looks exactly like a regression in the fast
+path. It happened three times while writing this table. Tap something inert (the
+fixture's `Plain Button`), name something that is definitely on the screen in
+front of you rather than one you remember, and check the first call's *reply*
+before trusting the other five.
 
 Discard the first call after a simulator starts — it includes connecting to the companion and runs an order of magnitude slower than the rest.
 

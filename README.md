@@ -157,13 +157,30 @@ ui_find { id: "qa1", label: "Welcome back" }
 ```
 
 The simulator resolves the element itself and returns only the match — a few
-hundred bytes, versus several kilobytes for a whole screen. `ui_tap` taps the
-centre of that element, so the model never handles a coordinate. `ui_find`
-returns the element without its subtree, and reports a miss as an ordinary
-answer rather than an error, so it is safe to poll with while waiting for
-something to appear.
+hundred bytes, versus several kilobytes for a whole screen. `ui_tap` operates
+that element, so the model never handles a coordinate. `ui_find` returns the
+element without its subtree, and reports a miss as an ordinary answer rather
+than an error.
 
-Matching is a case-sensitive substring match against the accessibility label.
+Matching is a case-sensitive substring match against the element's accessibility
+label, its visible text, or its accessibility identifier. The first match wins,
+so name things precisely — `ui_tap` replies with the element it acted on, which
+is where a wrong match shows up.
+
+`ui_tap` checks the touch will reach the element before sending it, so a control
+that is covered, scrolled out of view or disabled is **refused** rather than
+silently missed. A switch is switched rather than touched — its accessibility
+frame usually spans its whole row, so the centre is not the control — and the
+reply carries the state read back:
+
+```
+Tapped "Toolbar Button" (Button) at (102, 822).
+Toggled Sound off -> on.
+"Plain Stepper, Increment" is at {x:201 y:794 w:140 h:32}, but "Toolbar Search"
+is there instead, so a tap at its centre would not reach it.
+```
+
+`ui_tap { x, y }` is always a plain touch, for when you want exactly that.
 
 ### When you need to look around: `ui_describe_all`
 
@@ -190,7 +207,7 @@ All tools take a required `id` (session identifier) parameter.
 | `rotate` | `orientation` (`portrait`, `landscape_left`, `landscape_right`, `upside_down`) | Rotates the device, then reports the orientation the interface actually adopted |
 | `detect_rotation` | — | Detects device rotation and updates coordinate mapping |
 | `ui_find` | `label` | Finds one element by accessibility label, without fetching the screen |
-| `ui_tap` | `label?`, `x?`, `y?`, `duration?` | Tap an element by label, or at coordinates |
+| `ui_tap` | `label?`, `x?`, `y?`, `duration?`, `count?` | Operate an element by name, or tap at coordinates |
 | `ui_describe_all` | — | Returns accessibility tree for the entire screen (JSON) |
 | `ui_type` | `text` | Type text into the focused field |
 | `ui_swipe` | `x_start`, `y_start`, `x_end`, `y_end`, `duration?`, `delta?` | Swipe gesture |

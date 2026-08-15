@@ -202,8 +202,10 @@ things should not be frozen as they stand:
   nothing and leaks a process per script run until `--idle-shutdown-time`
   (3600s) reaps it. Keep the hook, but rewrite its header in host-agnostic
   terms (it currently justifies itself by *this server's* signal handlers),
-  document it, and expose `shutdown()` — `'exit'` never fires when the host
-  dies to an unhandled signal, so the hook is a backstop, not a guarantee.
+  document it, and expose `releaseCompanion()` — `'exit'` never fires when the
+  host dies to an unhandled signal, so the hook is a backstop, not a guarantee.
+  Note the reaper only ever touches companions: a script's simulator keeps
+  running, state intact, after the script exits.
   The consequence for the short-script workflow: each run pays a companion
   spawn (~0.5s bind, longer on a cold simulator). If that ever matters, the
   answer is the HTTP server, which *is* the persistent-companion daemon;
@@ -212,14 +214,140 @@ things should not be frozen as they stand:
 - **Simulator lifecycle: verbs in, policy out.** The library gets the explicit
   lifecycle calls — list, create, boot, shutdown, delete — because the
   short-script user needs to boot something, and the hard-won knowledge
-  (newest-first devicetype ordering, latest-runtime lookup, and above all
-  `waitUntilDriveable` with its 0x0-tree boot detection from BOOT_BUG.md) lives
+  (newest-first devicetype ordering, latest-runtime lookup, and above all the
+  0x0-tree boot detection from BOOT_BUG.md, which folds into `boot()` rather
+  than being exported by name) lives
   behind them. What stays out of the library is *implicit* lifecycle: nothing
   in `simgadget` ever destroys a simulator except an explicit call. Ownership
   tracking, sessions, and delete-what-we-created-on-exit are MCP-server policy
   and remain in `simgadget-mcp`. Multi-simulator "support" in the library is
   just functions keyed by udid — the session machinery that makes one server
   drive many simulators for many agents is likewise all server-side.
+
+## The library API
+
+Decided 2026-08-16, over several rounds of argument. A handle per simulator —
+not a bag of udid-taking functions, and not a god-object facade. The original
+"bag of functions" answer collapsed on inspection: every function was going to
+take `udid` as its first argument, and a repeated first argument on twenty
+functions is an object spelled worse. The handle also gives per-simulator
+state its one honest home (see the coordinate contract below).
+
+```ts
+listSimulators(): Promise<SimInfo[]>
+createSimulator(opts?: { deviceType?, name?, boot?: boolean }): Promise<Simulator>
+  // boots by default; { boot: false } opts out
+attachSimulator(udid: string): Promise<Simulator>
+  // verifies the simulator exists; no probing, stays cheap, claims no knowledge
+
+class Simulator {
+  readonly udid: string
+  readonly name: string
+
+  // lifecycle — all explicit. Nothing in the library ever destroys a
+  // simulator except a line of code the user wrote.
+  boot(): Promise<void>                  // includes the waitUntilDriveable learning
+  shutdown(): Promise<void>
+  delete(): Promise<void>
+
+  // apps
+  installApp(appPath: string): Promise<void>    // .app or .ipa
+  launchApp(bundleId: string): Promise<void>
+
+  // reading
+  describeAll(); describeScreen()
+  findByLabel(label); findByIdentifier(id); describePoint(x, y)
+
+  // acting
+  tap({ x, y } | { label }); swipe(from, to, opts?)
+  typeText(text); setToggle(label, on)
+
+  // orientation
+  rotate(orientation): Promise<Orientation>   // reports what the interface
+      // actually adopted — detected, not assumed; apps may decline
+  detectOrientation(): Promise<Orientation>   // resync after external rotation
+
+  // capture
+  screenshot(opts?: { path?: string }): Promise<Buffer>
+  startRecording(path: string): Promise<void>
+  stopRecording(): Promise<void>
+
+  // low level — you should never need these
+  restartBridge(): Promise<void>
+  diagnoseEmptyTree(): Promise<string>
+  releaseCompanion(): Promise<void>           // the exit hook does this anyway
+}
+
+prefetchCompanion(): Promise<string>          // low level: CI provisioning
+```
+
+Handles can go stale: after `delete()`, or when something external deletes the
+simulator, calls must fail with a clear "this simulator no longer exists", not
+a gRPC timeout.
+
+`screenshot` returns a Buffer (or writes to `path`); there is no `ui_view`
+equivalent, because base64-JPEG-in-a-tool-response is an MCP shape with no JS
+use. The learning behind ui_view comes along regardless: `simctl` always
+captures in physical portrait orientation, so the library rotates the capture
+to the logical orientation — shipping sideways landscape screenshots would be
+re-shipping a bug this repository already fixed once.
+
+The companion never appears in the happy path. It surfaces in exactly two
+places — the one-time download (which is what `prefetchCompanion` exists to
+front-run) and error messages — plus `releaseCompanion` for long-lived hosts
+that want teardown tidier than the exit hook. That is the right amount of
+visibility: the low-level group is, by definition, "the abstraction leaked and
+you are looking behind it".
+
+### The coordinate contract
+
+The library persists nothing it can re-derive, and is loud about the one thing
+it cannot. Three classes of state, treated differently:
+
+- **Portrait point dimensions: cached forever, safely.** A udid's device type
+  is fixed at creation and the portrait dimensions are a property of the
+  model. This is a genuine immutable, not a claim about a mutable world.
+- **Orientation aspect (portrait-family vs landscape-family): re-derived per
+  describe, for free.** Every describe already returns the root frame, and its
+  aspect refreshes the internal hint as a side effect. `rotate()` refreshes it
+  authoritatively, by reading back what the interface adopted.
+- **Chirality (landscape_left vs landscape_right, portrait vs upside_down):
+  rides on the hint, and the contract says so.** A describe cannot distinguish
+  the two landscapes — the aspect is identical — and the full probe costs a
+  few hundred ms per candidate orientation, far too much to run inside every
+  tap. So the hint is updated by `rotate()` and `detectOrientation()`, and an
+  *external* flip between same-aspect orientations is invisible until the
+  caller resyncs.
+
+The contract that falls out, stated for the README:
+
+> Coordinates are interpreted in the space of your most recent describe.
+> `tap({x, y})` works as long as nothing *external* has changed the simulator
+> since your last describe or rotate — those are exactly the calls that
+> refresh the library's knowledge. `tap({label})` resolves the element inside
+> the call, so it is immune to prior rotations, with one footnote: an external
+> flip between the two landscapes changes nothing a describe can see, so
+> chirality rides on the hint until `detectOrientation()`.
+
+Detecting orientation *inside* `tap({x, y})` was considered and rejected — not
+on cost but on semantics. The caller's coordinates only mean anything in the
+space of the describe they came from; if the simulator rotated since, they are
+stale, and transforming old-space coordinates with freshly-detected
+orientation just lands the tap in a *different* wrong place. Nothing rescues a
+stale coordinate. Coordinate-space consistency, not freshness, is the honest
+guarantee — and it is the same contract the MCP server already imposes on
+agents, so library and server tell one story.
+
+### Deliberately absent
+
+- **Sessions and ownership** — ids, the `owned` flag, delete-what-we-created
+  on exit: MCP-server policy, stays in `simgadget-mcp`. `SimSession` becomes a
+  wrapper around a `Simulator`.
+- **`ui_view`** — see above; `screenshot()` returns a Buffer.
+- **Cross-process companion reuse** — socket paths embed pid and generation,
+  so a new process cannot reconnect to a survivor; a persistent-companion
+  daemon with stable sockets is a real design with real staleness hazards,
+  and the HTTP server already *is* that daemon. Not in v1.
 
 ## Rename scope
 
@@ -284,8 +412,11 @@ impossible to revert.
   one that drops Intel. Details in the arm64 section above. Fail-loudly stands.
 - *Is a `macos-13` runner a useful x86_64 signal?* **No** — it cannot carry
   Xcode 26.6, so it is misleading reassurance. Also folded in above.
-- *Facade class or bag of functions?* **Functions.** A facade can be added in a
-  minor release; it can never be removed. The only real caller uses the
-  functions directly, and that is the honest shape to publish.
+- *Facade class or bag of functions?* **Neither: a handle per simulator** —
+  see "The library API". First answered "functions" (2026-08-15), reversed the
+  next day: the question posed a god-object against a bag of functions, and the
+  right shape was a third thing. Every function was going to take `udid` first,
+  which is an object spelled worse, and the handle gives per-simulator state
+  its one honest home.
 - *`simgadget` on npm?* **Available**, as is `simgadget-mcp`. Reserve both now
   (phase 0).

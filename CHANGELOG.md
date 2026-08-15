@@ -1,6 +1,102 @@
 # Changelog
 
-## Unreleased
+## 2.2.0
+
+### Taps are held long enough to land
+
+Every tap this server has ever sent was a touch-down and a touch-up in the same
+instant, and UIKit does not reliably see one. Measured against a switch in
+Settings, tapping the control itself: **5 of 12** instantaneous taps actuated it,
+against **12 of 12** with a 0.1s hold. The 2022 companion behaves the same
+(1 of 10 against 10 of 10), so this was never a regression in some version — it
+is what a zero-length touch has always been worth, and the likeliest explanation
+for any tap that reported success and changed nothing.
+
+Every tap is now held for at least 0.1s, whatever the caller asks for. That is
+well under UIKit's 0.5s long-press threshold, so nothing that was a tap becomes
+one. `ui_tap` by coordinate now costs 100–150ms, essentially all of it the hold.
+
+### A tap that cannot land says so, instead of reporting success
+
+`ui_tap {label}` now checks the touch will reach the element before sending it,
+with a hit-test costing ~10ms against a tap that costs ~110ms.
+
+The case this exists for: an element whose frame is perfectly correct but which
+is covered, below the fold, or scrolled out of view. Its centre belongs to
+whatever is drawn on top. In this project's own fixture, tapping the stepper's
+increment button by name focused the toolbar's search field, opened the
+keyboard, and answered `Tapped successfully` — with every frame involved
+correct, so no amount of tree work would have caught it.
+
+Disabled controls are refused for the same reason: the touch was delivered and
+ignored, which looks identical to a mis-aimed tap.
+
+`ui_tap {x, y}` is unaffected. Coordinates are the caller saying where, and are
+taken at their word.
+
+### `ui_tap` says what it tapped
+
+`Tapped "Toolbar Button" (Button) at (102, 822).` rather than
+`Tapped successfully`.
+
+Matching is substring and the companion returns its first hit, so the element
+found is not always the one meant — a status line reading `Settings Switch = on`
+has outranked the switch it was describing, and a permission alert's prose has
+outranked an app icon. Naming the element acted on puts that where a caller sees
+it immediately, rather than where they deduce it from the aftermath.
+
+Where several elements match, an exact name now beats a partial one and a
+control beats prose. An enclosing container no longer wins on document order
+alone.
+
+### Switches can be switched by name
+
+`ui_tap {label: "Sound"}` now operates a toggle instead of aiming a touch at it,
+and answers with the state it read back: `Toggled Sound off -> on.`
+
+A switch is the one control whose accessibility frame is routinely not the thing
+you can touch. A Settings row publishes a single element spanning label and
+control, so its centre is the gap between them; a bare `UISwitch` inherits
+whatever width its layout gives it. Tapping the centre of either actuated
+nothing, on the current companion and the 2022 one alike — measured 0 of 6 and
+0 of 8, with and without a hold. It never worked.
+
+So a toggle is activated the way VoiceOver activates it. The trade is stated
+plainly: that activation does not hit-test, so it will operate a switch a finger
+could not reach. `ui_tap {x, y}` remains a real touch for anyone who needs that
+fidelity, and the state read back makes a false pass visible rather than silent.
+
+Where activation cannot reach an element — a switch in a toolbar or nav bar, or
+one inside a sheet drawn by another process — the tap falls back to a real
+touch, because the accessibility action API has no way to select the backend
+that can see it.
+
+### Elements inside system sheets are where the tools say they are
+
+iOS draws some UI from a separate process hosted inside the app's window: the
+"Use Strong Password?" autofill sheet, photo and document pickers, share sheets.
+Their elements arrived in the same tree as the app's own, with frames measured
+from the hosting window rather than the screen.
+
+Untranslated this was not cosmetic. `ui_tap {label: "Fill Strong Password"}`
+resolved the label, tapped its centre, and reported success while the touch
+landed 476 points away — pressing "Login Submit" in the fixture.
+
+The offset was never missing: at the boundary the subtree restarts at a local
+origin while its parent still describes that region in screen space, and the two
+rectangles are the same size. Pruning was discarding the parent. A full-screen
+picker is hosted identically and its frames are already correct, so the
+correction is derived per hosted view rather than applied to anything that looks
+like a sheet.
+
+`ui_describe_point` is corrected the same way, so it and `ui_describe_all` agree
+about such an element.
+
+### `ui_find` resolves accessibility identifiers
+
+The tree publishes `AXUniqueId`, so handing one back is the obvious thing to do.
+It used to answer "No element found" for a name it had just given you. Tried
+after the label, so it costs nothing until that has missed.
 
 ### One name per element, whichever tool you ask
 
