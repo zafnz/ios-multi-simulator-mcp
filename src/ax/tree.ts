@@ -70,6 +70,60 @@ export const DESCRIBE_KEYS = [
 ];
 
 /**
+ * The keys a point read asks for: the shared set, plus `subrole`.
+ *
+ * `subrole` is never returned to a caller — `canonicalise` drops it, being
+ * outside `DESCRIBE_KEYS` — and is asked for solely as evidence for
+ * `reconcileType`. It costs nothing worth counting: a point read returns one
+ * element, not a tree.
+ */
+export const POINT_KEYS = [...DESCRIBE_KEYS, "subrole"];
+
+/**
+ * Translates the point read's `type` into the vocabulary the tree uses.
+ *
+ * The two reads are served by different accessibility backends, and they name
+ * the same element differently — the tree calls a search field `SearchField`
+ * where a point read calls it `TextField`, a switch `Switch` against
+ * `CheckBox`, a segment `Button` against `RadioButton`. An agent branching on
+ * `type` would behave differently depending on which tool it happened to call,
+ * which is exactly the inconsistency `canonicalise` was meant to end: that fix
+ * settled which keys are present, not that their values agree.
+ *
+ * **`type` alone cannot be mapped**, which is why this takes the subrole too.
+ * The point read calls a plain field and a search field both `TextField`, so
+ * `TextField -> SearchField` would promote every text field on the screen. The
+ * subrole is what separates them, and it is exact: `AXSearchField` appears on
+ * the search field and on nothing else.
+ *
+ * Direction is deliberate. The tree's vocabulary wins because that is the read
+ * agents navigate by; the point read is the outlier, and it is also the one
+ * carrying the evidence to translate itself. The one thing lost is `Heading`,
+ * which the point read knows and the tree does not — spending a real
+ * distinction to buy consistency, because two tools disagreeing about one
+ * element is worse than both being slightly coarse.
+ */
+export function reconcileType(
+  type: unknown,
+  subrole: unknown
+): string | undefined {
+  if (typeof type !== "string") return undefined;
+  if (typeof subrole === "string") {
+    const bySubrole: Record<string, string> = {
+      AXSearchField: "SearchField",
+      AXSwitch: "Switch",
+      // A tab or segment: the tree calls both plain `Button`.
+      AXTabButton: "Button",
+    };
+    const mapped = bySubrole[subrole];
+    if (mapped) return mapped;
+  }
+  // No subrole to go on: the tree has no `Heading`, calling such text plain
+  // `StaticText`.
+  return type === "Heading" ? "StaticText" : type;
+}
+
+/**
  * Reduces an element to the one shape every tool returns.
  *
  * Enforced here rather than by asking the companion, because asking does not

@@ -11,6 +11,7 @@ import {
   matchInTree,
   normaliseForMatch,
   pruneTree,
+  reconcileType,
   uniquelyLabelled,
 } from "../src/ax/tree.ts";
 
@@ -124,6 +125,48 @@ test("canonicalise", async (t) => {
   await t.test("false and 0 survive — they are answers, not absences", () => {
     const out = canonicalise({ enabled: false, type: "Button" });
     assert.deepEqual(out, { type: "Button", enabled: false });
+  });
+});
+
+// Every pair below was read off a live screen: the same element described by
+// ui_describe_all and then by ui_describe_point, with identical frames.
+test("reconcileType", async (t) => {
+  await t.test("promotes a search field, which needs the subrole", () => {
+    assert.equal(reconcileType("TextField", "AXSearchField"), "SearchField");
+  });
+
+  // The reason a type-only mapping cannot work: this backend calls both of
+  // these `TextField`, so mapping on the type alone would promote every text
+  // field on the screen to a search field.
+  await t.test("leaves a plain text field alone", () => {
+    assert.equal(reconcileType("TextField", null), "TextField");
+    assert.equal(reconcileType("TextField", undefined), "TextField");
+  });
+
+  await t.test("renames the controls the two backends disagree about", () => {
+    assert.equal(reconcileType("CheckBox", "AXSwitch"), "Switch");
+    assert.equal(reconcileType("RadioButton", "AXTabButton"), "Button");
+  });
+
+  await t.test("flattens Heading, which the tree does not have", () => {
+    assert.equal(reconcileType("Heading", null), "StaticText");
+  });
+
+  await t.test("passes through what both backends already agree on", () => {
+    for (const type of ["Button", "StaticText", "Slider", "Image", "Other"]) {
+      assert.equal(reconcileType(type, null), type);
+    }
+  });
+
+  // The subrole is evidence, not an instruction: one we have no mapping for
+  // must not disturb the type that came with it.
+  await t.test("ignores a subrole it has no rule for", () => {
+    assert.equal(reconcileType("Button", "AXSomethingNew"), "Button");
+  });
+
+  await t.test("survives a missing type", () => {
+    assert.equal(reconcileType(undefined, "AXSwitch"), undefined);
+    assert.equal(reconcileType(null, null), undefined);
   });
 });
 

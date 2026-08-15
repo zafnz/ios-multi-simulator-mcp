@@ -164,9 +164,38 @@ static NSString *DeviceOrientationName(UIDeviceOrientation o) {
         forControlEvents:UIControlEventTouchUpInside];
   systemModal.accessibilityIdentifier = @"SystemModalButton";
 
+  // --- One of each control kind, for the type vocabulary --------------------
+  //
+  // TODO.md #58: the same element is described with a different `type`
+  // depending on which tool asked, because the whole-screen read and the point
+  // read are served by different accessibility backends. A UIButton is called
+  // "Button" by both, so the fixture could not show the problem at all. These
+  // are the kinds whose names plausibly differ; each is here to be looked up
+  // twice and have the two answers compared, not to be interacted with.
+  UISearchBar *searchBar = [[UISearchBar alloc] init];
+  searchBar.placeholder = @"Search Bar";
+  searchBar.accessibilityIdentifier = @"SearchBar";
+
+  UISwitch *toggle = [[UISwitch alloc] init];
+  toggle.accessibilityLabel = @"Plain Switch";
+  toggle.accessibilityIdentifier = @"PlainSwitch";
+
+  UISlider *slider = [[UISlider alloc] init];
+  slider.accessibilityLabel = @"Plain Slider";
+  slider.accessibilityIdentifier = @"PlainSlider";
+
+  UIStepper *stepper = [[UIStepper alloc] init];
+  stepper.accessibilityLabel = @"Plain Stepper";
+  stepper.accessibilityIdentifier = @"PlainStepper";
+
+  UISegmentedControl *segmented =
+      [[UISegmentedControl alloc] initWithItems:@[ @"Seg One", @"Seg Two" ]];
+  segmented.selectedSegmentIndex = 0;
+  segmented.accessibilityIdentifier = @"PlainSegmented";
+
   UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[
     self.plainField, plainButton, self.status, self.orientation, inAppModal,
-    systemModal
+    systemModal, searchBar, toggle, slider, stepper, segmented
   ]];
   stack.axis = UILayoutConstraintAxisVertical;
   stack.spacing = 24;

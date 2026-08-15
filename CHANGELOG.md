@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+### One name per element, whichever tool you ask
+
+`ui_describe_all` and `ui_describe_point` are served by different accessibility
+backends, and they named the same element differently: a search field was
+`SearchField` to one and `TextField` to the other, a switch `Switch` against
+`CheckBox`, a segment `Button` against `RadioButton`, a nav bar title
+`StaticText` against `Heading`. An agent branching on `type` behaved differently
+depending on which tool it happened to call.
+
+Point reads now answer in the vocabulary the tree uses. Measured on a screen
+with one of every control kind: 17 elements described both ways, previously five
+disagreements, now none.
+
+The obvious fix — mapping the type strings — cannot work, because the point
+read calls a plain field and a search field both `TextField`; promoting that
+type would promote every text field on screen. The element's `subrole` is what
+separates them, so that is what the translation reads. It is asked for as
+evidence and never returned.
+
 ## 2.1.1
 
 ### Fixed: a client in a container could not connect

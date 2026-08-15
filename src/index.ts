@@ -20,7 +20,9 @@ import {
   collectProbeCandidates,
   isDegenerateTree,
   matchInTree,
+  POINT_KEYS,
   pruneTree,
+  reconcileType,
   uniquelyLabelled,
 } from "./ax/tree";
 import {
@@ -263,8 +265,12 @@ async function describePoint(
         const element = (await client.accessibilityInfo({
           point: { x: Math.round(x), y: Math.round(y) },
           format: Format.LEGACY,
-          keys: DESCRIBE_KEYS,
+          keys: POINT_KEYS,
         })) as AXElement;
+        // This backend has its own names for things. Say what the tree would.
+        if (element) {
+          element.type = reconcileType(element.type, element.subrole);
+        }
         // A real frame, not merely a reply: a booting simulator answers a point
         // read with an empty 0x0 element before its bridge is up.
         if (element?.frame && (element.frame.width || element.frame.height)) {
