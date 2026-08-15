@@ -316,6 +316,21 @@ static NSString *DeviceOrientationName(UIDeviceOrientation o) {
   // element, drawn at the leading edge of the stack. Between them they rule out
   // "tap the trailing edge of a switch's frame" as a fix, which is why both are
   // kept.
+  // A control that is present, named, on screen — and cannot be operated.
+  //
+  // Worth having because the symptom is indistinguishable from every other
+  // "the tap did nothing": before the tools checked `enabled`, a disabled
+  // button swallowed the touch and reported success exactly like a mis-aimed
+  // one. The action is wired up on purpose — if the status line ever reads
+  // "disabled button fired", something has activated a control iOS says is off.
+  UIButton *disabled = [UIButton buttonWithType:UIButtonTypeSystem];
+  [disabled setTitle:@"Disabled Button" forState:UIControlStateNormal];
+  [disabled addTarget:self
+                action:@selector(disabledButtonTapped)
+      forControlEvents:UIControlEventTouchUpInside];
+  disabled.enabled = NO;
+  disabled.accessibilityIdentifier = @"DisabledButton";
+
   // A Settings-shaped row: label on the left, switch on the right, and one
   // accessibility element covering both — the switch, reporting the row as its
   // frame. So a lookup by name finds a control that can be operated, while the
@@ -388,7 +403,8 @@ static NSString *DeviceOrientationName(UIDeviceOrientation o) {
     // the screens other tests start from, or are tapped directly, and a control
     // that needs scrolling to reach is a control whose test can fail for a
     // reason that is not the tool.
-    self.plainField, plainButton, self.status, self.orientation, login, picker,
+    self.plainField, plainButton, disabled, self.status, self.orientation,
+    login, picker,
     settingsRow, splitRow, inAppModal, systemModal, searchBar, toggle, slider,
     stepper, segmented
   ]];
@@ -432,6 +448,11 @@ static NSString *DeviceOrientationName(UIDeviceOrientation o) {
 // higher up the screen it wins, so the second lookup of a control resolves the
 // sentence describing the first. Observed: one toggle by name worked, and the
 // next tapped the status label instead. "settings toggle" collides with nothing.
+// Never expected to run. If it does, a disabled control was activated.
+- (void)disabledButtonTapped {
+  [self report:@"disabled button fired"];
+}
+
 - (void)settingsSwitchChanged:(UISwitch *)sender {
   [self report:[NSString stringWithFormat:@"settings toggle = %@",
                                           sender.isOn ? @"on" : @"off"]];

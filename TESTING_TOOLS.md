@@ -100,7 +100,7 @@ launch_app(id: "test-session", bundle_id: "com.example.mcptestapp")
 ui_view(id: "test-session")
 ```
 
-**Expected:** A screenshot showing a nav bar with **Nav Button**, a text field, **Plain Button**, a status label reading `status: ready`, an orientation label reading `orientation: interface=portrait device=portrait`, **Show Login**, **Show Picker**, a Settings-shaped **Settings Switch** row and a plain **Split Switch** row, **Show In-App Modal**, **Ask Permission**, and a row of one-of-each controls (search bar, switch, slider, stepper, segmented control), and a bottom toolbar with **Toolbar Button** and a search field.
+**Expected:** A screenshot showing a nav bar with **Nav Button**, a text field, **Plain Button**, a greyed-out **Disabled Button**, a status label reading `status: ready`, an orientation label reading `orientation: interface=portrait device=portrait`, **Show Login**, **Show Picker**, a Settings-shaped **Settings Switch** row and a plain **Split Switch** row, **Show In-App Modal**, **Ask Permission**, and a row of one-of-each controls (search bar, switch, slider, stepper, segmented control), and a bottom toolbar with **Toolbar Button** and a search field.
 
 The tail of that list runs past the fold — the stepper and segmented control sit below the toolbar and are not visible without scrolling. They are in the tree, which is what the steps below need.
 
@@ -113,7 +113,7 @@ ui_describe_all(id: "test-session")
 **Expected:** Every control is present, and — the point of this step — the `NavigationBar` and `Toolbar` groups **have children**:
 
 - `NavButton`, inside the nav bar
-- `PlainField`, `PlainButton`, `StatusLabel`, `OrientationLabel`, `InAppModalButton`, `SystemModalButton`, `SearchBar`, `PlainSwitch`, `PlainSlider`, `PlainStepper`, `PlainSegmented` in the plain hierarchy
+- `PlainField`, `PlainButton`, `DisabledButton` (with `"enabled": false`), `StatusLabel`, `OrientationLabel`, `InAppModalButton`, `SystemModalButton`, `SearchBar`, `PlainSwitch`, `PlainSlider`, `PlainStepper`, `PlainSegmented` in the plain hierarchy
 - `ToolbarButton` and a text field, inside the toolbar
 
 A nav bar or toolbar coming back with no children means the tree has regressed to the incomplete read, and everything below will fail.
@@ -498,7 +498,29 @@ The `(StaticText)` in that reply is the useful part: it says plainly that the na
 
 That is correct, not a bug, and it is here so nobody later "fixes" it. `Split Switch` is a label and a switch in a plain container with nothing merging them, so iOS publishes two elements: a static text carrying the name, and an unnamed switch beside it. The name genuinely refers to the text. A VoiceOver user meets the same wall and moves on to the switch. The rule the tools follow is that they operate what iOS says the element *is* — and no amount of activation makes a label into a control.
 
-### #47 A covered control must refuse, not tap something else
+### #47 A disabled control must refuse, not swallow the tap
+
+```
+ui_find(id: "toggle-test", label: "Disabled Button")
+ui_tap(id: "toggle-test", label: "Disabled Button")
+```
+
+**Expected:** the find reports `"enabled": false`; the tap is an **error**:
+
+> `"Disabled Button" is disabled, so tapping it would do nothing. It is at {x:61 y:252 w:280 h:30}.`
+
+Then check that the refusal is telling the truth rather than merely being careful — a real touch at the same place must also do nothing:
+
+```
+ui_tap(id: "toggle-test", x: 201, y: 267)
+ui_find(id: "toggle-test", label: "status:")
+```
+
+**Expected:** `status: ready`, unchanged. The fixture's disabled button *is* wired to an action, so `status: disabled button fired` would mean something activated a control iOS says is off — a far more interesting failure than the one this step is guarding.
+
+A disabled control is worth its own step because its symptom is identical to every other kind of failed tap: the touch is delivered, nothing happens, and before this check the reply said success.
+
+### #48 A covered control must refuse, not tap something else
 
 The fixture's stepper sits below the fold, under the toolbar — its frame is perfectly correct, and its centre belongs to the toolbar's search field:
 
@@ -592,13 +614,13 @@ All tools tested:
 | Tool | Steps |
 |------|-------|
 | `start_simulator` | #1, #21, #23, #35, #43 |
-| `destroy_simulator` | #21, #22, #34, #42, #47 |
+| `destroy_simulator` | #21, #22, #34, #42, #48 |
 | `attach_simulator` | #21 |
 | `rotate` | #26 |
 | `detect_rotation` | #27 |
 | `ui_describe_all` | #3, #10, #25, #29 |
-| `ui_find` | #11, #12, #13, #15, #30, #32, #33, #37, #40, #45, #46 |
-| `ui_tap` | #13, #14, #19, #30, #32, #33, #35, #39, #41, #44, #45, #46, #47 |
+| `ui_find` | #11, #12, #13, #15, #30, #32, #33, #37, #40, #45, #46, #47 |
+| `ui_tap` | #13, #14, #19, #30, #32, #33, #35, #39, #41, #44, #45, #46, #47, #48 |
 | `ui_type` | #15, #33 |
 | `ui_swipe` | #5 |
 | `ui_describe_point` | #4, #16, #38 |
