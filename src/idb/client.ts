@@ -13,6 +13,7 @@ import {
   AccessibilityInfoRequest,
   AccessibilityInfoRequest_Backend,
   AccessibilityInfoRequest_Format,
+  AccessibilityActionRequest,
   AccessibilityActionRequest_SearchableKey,
   CompanionServiceClient,
   HIDEvent,
@@ -182,6 +183,39 @@ export class IdbClient {
         `Companion returned unparseable accessibility JSON: ${(e as Error).message}`
       );
     }
+  }
+
+  /**
+   * Activates an element through accessibility rather than by touching it.
+   *
+   * The companion implements this as `AXPress` — the activation VoiceOver
+   * performs — so it operates a control the caller cannot aim at: a switch
+   * whose accessibility frame spans its whole row actuates nowhere near its own
+   * centre, and no coordinate derived from the tree will hit it.
+   *
+   * It is not a touch, and the difference matters in both directions. It cannot
+   * carry a hold duration, and it does not hit-test, so it will operate a
+   * control that a finger could not reach. Callers decide when that trade is
+   * the right one; this only performs it.
+   */
+  async activate(
+    marker: string,
+    matchKey: AccessibilityActionRequest_SearchableKey
+  ): Promise<void> {
+    const request = AccessibilityActionRequest.fromPartial({
+      marker,
+      matchKey,
+      depth: MARKER_DEFAULT_DEPTH,
+      tap: {},
+    });
+    await this.unary<unknown>((cb) =>
+      this.client.accessibilityAction(
+        request,
+        new grpc.Metadata(),
+        deadline(READ_TIMEOUT_MS),
+        (err, res) => cb(err, res)
+      )
+    );
   }
 
   /** Taps once at a point, optionally holding for `duration` seconds. */

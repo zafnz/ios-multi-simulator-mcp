@@ -132,11 +132,41 @@ static NSString *DeviceOrientationName(UIDeviceOrientation o) {
 
 #pragma mark - Root view controller
 
+/**
+ * A switch that reports its whole row as its accessibility frame.
+ *
+ * This is the shape a Settings row actually publishes, measured against
+ * Settings > General > Keyboard > Sound: a single element at
+ * {36, 481.33, 330, 28} — 330 wide spans the row, but 28 high is the *switch's*
+ * height, not the row's 53. The element is the control with a widened frame,
+ * which is why VoiceOver can operate it and why its centre actuates nothing.
+ *
+ * A getter rather than a stored `accessibilityFrame`, which is in screen
+ * coordinates and would go stale the moment the row scrolled.
+ * `accessibilityFrameInContainerSpace` would avoid that, but it is declared on
+ * UIAccessibilityElement only — assigning it to a view compiles through `id` and
+ * then dies at runtime with `doesNotRecognizeSelector`, which is how this
+ * comment came to be written.
+ */
+@interface RowWideSwitch : UISwitch
+@end
+
+@implementation RowWideSwitch
+
+- (CGRect)accessibilityFrame {
+  UIView *row = self.superview;
+  if (!row) return [super accessibilityFrame];
+  return UIAccessibilityConvertFrameToScreenCoordinates(row.bounds, row);
+}
+
+@end
+
 @interface RootViewController : UIViewController <UITextFieldDelegate>
 @property(nonatomic, strong) UILabel *status;
 @property(nonatomic, strong) UILabel *orientation;
 @property(nonatomic, strong) UITextField *plainField;
 @property(nonatomic, strong) UITextField *toolbarField;
+@property(nonatomic, strong) UISwitch *settingsSwitch;
 @end
 
 @implementation RootViewController
@@ -273,6 +303,69 @@ static NSString *DeviceOrientationName(UIDeviceOrientation o) {
   segmented.selectedSegmentIndex = 0;
   segmented.accessibilityIdentifier = @"PlainSegmented";
 
+  // A Settings-shaped switch row, and the reason it is a real UITableView
+  // rather than a label beside a UISwitch: the shape under test is not the
+  // layout, it is what UIKit does to the *accessibility* of a cell whose
+  // accessory is a switch. It fuses the two into one element carrying the
+  // label, the switch's value and its traits, with a frame spanning the whole
+  // row — so the element's centre is the empty gap between the label and the
+  // control, and a tap there actuates nothing. Building it by hand out of a
+  // container view would reproduce the picture and not the bug.
+  //
+  // `PlainSwitch` above is the contrast: a bare UISwitch, its own accessibility
+  // element, drawn at the leading edge of the stack. Between them they rule out
+  // "tap the trailing edge of a switch's frame" as a fix, which is why both are
+  // kept.
+  // A Settings-shaped row: label on the left, switch on the right, and one
+  // accessibility element covering both — the switch, reporting the row as its
+  // frame. So a lookup by name finds a control that can be operated, while the
+  // centre of what it reports is the empty gap between label and switch.
+  self.settingsSwitch = [[RowWideSwitch alloc] init];
+  self.settingsSwitch.accessibilityLabel = @"Settings Switch";
+  self.settingsSwitch.accessibilityIdentifier = @"SettingsSwitch";
+  [self.settingsSwitch addTarget:self
+                          action:@selector(settingsSwitchChanged:)
+                forControlEvents:UIControlEventValueChanged];
+
+  UILabel *settingsLabel = [[UILabel alloc] init];
+  settingsLabel.text = @"Settings Switch";
+  settingsLabel.font = [UIFont systemFontOfSize:15];
+  // Not published: the row has one element and it is the switch. A visible label
+  // that is *also* an element is the `Split Switch` case below, which teaches
+  // the opposite lesson and is kept separate on purpose.
+  settingsLabel.isAccessibilityElement = NO;
+
+  UIStackView *settingsRow = [[UIStackView alloc]
+      initWithArrangedSubviews:@[ settingsLabel, self.settingsSwitch ]];
+  settingsRow.axis = UILayoutConstraintAxisHorizontal;
+  settingsRow.distribution = UIStackViewDistributionEqualSpacing;
+  settingsRow.alignment = UIStackViewAlignmentCenter;
+  settingsRow.layoutMarginsRelativeArrangement = YES;
+  settingsRow.layoutMargins = UIEdgeInsetsMake(6, 12, 6, 12);
+  settingsRow.backgroundColor = UIColor.secondarySystemBackgroundColor;
+  settingsRow.layer.cornerRadius = 10;
+
+  // The third shape, and the one no fix can rescue: a label and a switch in a
+  // plain container, which iOS exposes as *two* elements — a static text named
+  // "Split Switch" and an unnamed switch beside it. Nothing merges them, so a
+  // lookup by that name resolves the text, and a text is not a control. A
+  // VoiceOver user meets the same wall and swipes on to the switch.
+  //
+  // Here so the boundary is pinned rather than assumed: `Settings Switch` is
+  // what the tools can operate by name, this is what they cannot, and the
+  // difference is the app's accessibility rather than anything we control.
+  UILabel *splitLabel = [[UILabel alloc] init];
+  splitLabel.text = @"Split Switch";
+  splitLabel.font = [UIFont systemFontOfSize:15];
+  UISwitch *splitSwitch = [[UISwitch alloc] init];
+  splitSwitch.accessibilityIdentifier = @"SplitSwitch";
+  UIStackView *splitRow = [[UIStackView alloc]
+      initWithArrangedSubviews:@[ splitLabel, splitSwitch ]];
+  splitRow.axis = UILayoutConstraintAxisHorizontal;
+  splitRow.distribution = UIStackViewDistributionEqualSpacing;
+  splitRow.alignment = UIStackViewAlignmentCenter;
+
+
   // These live in the scrolling content, not the nav bar. Two extra bar items
   // were enough to make UIKit collapse `Nav Button` into an overflow menu,
   // which quietly removed the one nav-bar control the test plan taps.
@@ -291,14 +384,19 @@ static NSString *DeviceOrientationName(UIDeviceOrientation o) {
   picker.accessibilityIdentifier = @"ShowPickerButton";
 
   UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[
-    // `login` and `picker` sit high up on purpose: they open the screens other
-    // tests start from, and a control that needs scrolling to reach is a
-    // control whose test can fail for a reason that is not the tool.
+    // `login`, `picker` and `settingsTable` sit high up on purpose: they open
+    // the screens other tests start from, or are tapped directly, and a control
+    // that needs scrolling to reach is a control whose test can fail for a
+    // reason that is not the tool.
     self.plainField, plainButton, self.status, self.orientation, login, picker,
-    inAppModal, systemModal, searchBar, toggle, slider, stepper, segmented
+    settingsRow, splitRow, inAppModal, systemModal, searchBar, toggle, slider,
+    stepper, segmented
   ]];
   stack.axis = UILayoutConstraintAxisVertical;
-  stack.spacing = 24;
+  // Tightened from 24 when the settings row was added, so the controls below it
+  // stay above the toolbar. A control under the toolbar is not merely hard to
+  // see: a tap at its centre lands on the toolbar instead.
+  stack.spacing = 16;
   stack.translatesAutoresizingMaskIntoConstraints = NO;
 
   // Scrolling, because the fixture keeps growing and a control that ends up
@@ -326,6 +424,17 @@ static NSString *DeviceOrientationName(UIDeviceOrientation o) {
         constraintEqualToAnchor:scroll.frameLayoutGuide.centerXAnchor],
     [stack.widthAnchor constraintEqualToConstant:280],
   ]];
+}
+
+// Reports in lower case, and that is load-bearing rather than a style choice.
+// Matching is substring and case-sensitive, so a status line reading
+// "Settings Switch = on" is itself a match for "Settings Switch" — and being
+// higher up the screen it wins, so the second lookup of a control resolves the
+// sentence describing the first. Observed: one toggle by name worked, and the
+// next tapped the status label instead. "settings toggle" collides with nothing.
+- (void)settingsSwitchChanged:(UISwitch *)sender {
+  [self report:[NSString stringWithFormat:@"settings toggle = %@",
+                                          sender.isOn ? @"on" : @"off"]];
 }
 
 - (void)viewDidAppear:(BOOL)animated {

@@ -291,6 +291,29 @@ export function translateRemoteSubtrees(elements: AXElement[]): AXElement[] {
   return elements.map((root) => visit(root, 0, 0, null));
 }
 
+/**
+ * Whether an element is a toggle — something with an on/off state that a tap is
+ * meant to flip.
+ *
+ * Keyed on what iOS says the element *is*, not on what produced it. A Settings
+ * row and a bare `UISwitch` are built completely differently and both arrive
+ * here as a switch; an app that ships its own toggle with the right traits does
+ * too. The `AXValue` requirement is what keeps a plain button out: a button is
+ * pressed, a toggle is switched, and only the second has a state to report back.
+ *
+ * `type` alone is not enough because the two backends name this differently —
+ * the tree says `Switch`, a point read says `CheckBox` (see `reconcileType`) —
+ * and a caller can hand us either.
+ */
+export function isToggle(element: AXElement): boolean {
+  const type = typeof element.type === "string" ? element.type : "";
+  if (type !== "Switch" && type !== "CheckBox" && type !== "Toggle") {
+    return false;
+  }
+  const value = element.AXValue;
+  return typeof value === "string" || typeof value === "number";
+}
+
 /** True when the point falls inside the frame, edges included. */
 export function frameContains(frame: Frame, x: number, y: number): boolean {
   return (

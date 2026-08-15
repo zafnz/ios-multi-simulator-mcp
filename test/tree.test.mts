@@ -11,6 +11,7 @@ import {
   isDegenerateTree,
   isInteresting,
   isRemotelyHosted,
+  isToggle,
   locateInTree,
   matchInTree,
   normaliseForMatch,
@@ -470,6 +471,38 @@ test("locateInTree", async (t) => {
   await t.test("declines to guess without a frame to match against", () => {
     const element = { ...asPointRead(), frame: undefined };
     assert.equal(locateInTree(corrected(), element, 201, 737), null);
+  });
+});
+
+test("isToggle", async (t) => {
+  // The two names the backends give the same control: the tree says Switch, a
+  // point read says CheckBox, and a caller can hand us either.
+  await t.test("recognises a switch from either backend's vocabulary", () => {
+    assert.equal(isToggle({ type: "Switch", AXValue: "1" }), true);
+    assert.equal(isToggle({ type: "CheckBox", AXValue: "0" }), true);
+  });
+
+  await t.test("accepts a numeric value", () => {
+    assert.equal(isToggle({ type: "Switch", AXValue: 0 }), true);
+  });
+
+  // A button is pressed, not switched, and has no state to report back.
+  await t.test("a button is not a toggle", () => {
+    assert.equal(isToggle({ type: "Button", AXLabel: "Plain Button" }), false);
+  });
+
+  // The Split Switch case: the name resolves to the label, not the control.
+  await t.test("static text is not a toggle", () => {
+    assert.equal(isToggle({ type: "StaticText", AXLabel: "Split Switch" }), false);
+  });
+
+  await t.test("a switch with no value is not treated as one", () => {
+    assert.equal(isToggle({ type: "Switch" }), false);
+    assert.equal(isToggle({ type: "Switch", AXValue: null }), false);
+  });
+
+  await t.test("survives an element with no type at all", () => {
+    assert.equal(isToggle({}), false);
   });
 });
 

@@ -20,6 +20,7 @@ import {
   collectProbeCandidates,
   isDegenerateTree,
   isRemotelyHosted,
+  isToggle,
   locateInTree,
   matchInTree,
   POINT_KEYS,
@@ -1568,6 +1569,133 @@ if (!isToolFiltered("ui_find")) {
 }
 
 /**
+ * Resolves an element by its accessibility identifier — exact, where a label is
+ * a substring that can drift onto something else as a screen changes.
+ *
+ * No AXBridge fallback: this exists to re-read an element the caller has already
+ * found, so a miss means it has genuinely gone rather than that a backend cannot
+ * see it, and paying ~300ms to confirm a disappearance helps nobody.
+ */
+async function findByIdentifier(
+  udid: string,
+  identifier: string
+): Promise<AXElement | null> {
+  return withAccessibilityRecovery(udid, () =>
+    companions.withClient(udid, async (client) => {
+      try {
+        const found = (await client.accessibilityInfo({
+          marker: identifier,
+          matchKey: SearchableKey.UNIQUE_ID,
+          keys: DESCRIBE_KEYS,
+        })) as { elements?: AXElement } | null;
+        markAccessibilityAnswered(udid);
+        return found?.elements ? canonicalise(found.elements) : null;
+      } catch (error) {
+        if (/found no element/i.test((error as Error).message)) {
+          markAccessibilityAnswered(udid);
+          return null;
+        }
+        throw error;
+      }
+    })
+  );
+}
+
+/**
+ * Flips a toggle, and answers with the state it left it in.
+ *
+ * Why this is not a tap. A switch's accessibility frame is routinely not its
+ * actuating region: a Settings row fuses label and control into one element
+ * spanning the row, so its centre is the gap between them, and even a bare
+ * `UISwitch` inherits whatever width its layout gives it — in this project's own
+ * fixture, 282 points of frame around 63 points of control at the leading edge.
+ * Neither is tappable at its centre, and no coordinate the tree can offer will
+ * hit either. Measured before this existed: 0/6 and 0/8, with and without a
+ * hold, on the pinned companion and on the 2022 one alike. It has never worked.
+ *
+ * So the element is activated the way VoiceOver activates it, which is the whole
+ * reason iOS publishes it as a single toggle in the first place. That is a
+ * deliberate step away from "synthesize a touch": `AXPress` does not hit-test,
+ * so it will operate a switch that a finger could not reach — one covered by an
+ * invisible overlay, say. `ui_tap {x, y}` remains a real touch for callers who
+ * need that fidelity, and asking for a `duration` keeps the touch here too.
+ *
+ * The answer carries the value read back rather than "Tapped successfully",
+ * because the cost of this whole class of bug has been silent success: a tap
+ * that hit the wrong control, a tap that landed 40% of the time, a tap that
+ * actuated nothing — each reported exactly the same cheerful string. A caller
+ * that is told the state can notice when it did not change; one told "tapped"
+ * cannot.
+ */
+async function toggleElement(
+  udid: string,
+  element: AXElement,
+  label: string
+): Promise<{ isError: false; content: { type: "text"; text: string }[] }> {
+  const before = element.AXValue;
+  const name = typeof element.AXLabel === "string" ? element.AXLabel : label;
+
+  // Prefer the identifier: the companion re-resolves the element itself, with
+  // its own stricter matching, and an identifier is exact where a label is a
+  // substring that may well match something else on screen. `findByLabel` has
+  // already done the forgiving match — this only has to name what it found.
+  const id = element.AXUniqueId;
+  const useId = typeof id === "string" && id.length > 0;
+
+  await withAccessibilityRecovery(udid, () =>
+    companions.withClient(
+      udid,
+      (client) =>
+        client.activate(
+          useId ? id : name,
+          useId ? SearchableKey.UNIQUE_ID : SearchableKey.LABEL
+        ),
+      { exclusive: true }
+    )
+  );
+
+  // Read it back rather than assuming it flipped — by identifier where there is
+  // one, because a label is a substring and the screen has just changed. An app
+  // that reports what happened in its own UI is enough to break this: the
+  // fixture's status line reads "Settings Switch = on" after the toggle, so a
+  // second lookup for "Settings Switch" finds that sentence rather than the
+  // control, and reads back no value at all.
+  const after = useId
+    ? await findByIdentifier(udid, id)
+    : await findByLabel(udid, label);
+  const now = after?.AXValue;
+  const state = (value: unknown) =>
+    value === "1" || value === 1 ? "on" : value === "0" || value === 0 ? "off" : `${value}`;
+
+  if (now === undefined || now === null) {
+    return {
+      isError: false,
+      content: [
+        {
+          type: "text",
+          text: `Activated ${name}, but could not read its state back to confirm it changed.`,
+        },
+      ],
+    };
+  }
+
+  return {
+    isError: false,
+    content: [
+      {
+        type: "text",
+        text:
+          now === before
+            ? `Activated ${name} through accessibility, but it is still ${state(now)}. ` +
+              `The control may be disabled, or it may not respond to activation — ` +
+              `use ui_view and tap the switch itself with ui_tap {x, y}.`
+            : `Toggled ${name} ${state(before)} -> ${state(now)}.`,
+      },
+    ],
+  };
+}
+
+/**
  * The shortest press that actually actuates a control.
  *
  * A tap with no hold is a touch-down and a touch-up in the same instant, and
@@ -1637,6 +1765,13 @@ if (!isToolFiltered("ui_tap")) {
               `No element found whose label contains "${label}". Use ui_describe_all to see what is on screen.`
             );
           }
+
+          // A toggle is operated, not touched — unless the caller asked for a
+          // hold, which is a gesture and can only be a real one.
+          if (isToggle(element) && duration === undefined && count === 1) {
+            return await toggleElement(sim.udid, element, label);
+          }
+
           const centre = centreOf(element);
           if (!centre) {
             throw new Error(

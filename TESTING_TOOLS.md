@@ -1,6 +1,6 @@
 # Testing the tools
 
-Exercises every MCP tool against one simulator. Part 1 covers portrait, Part 2 verifies coordinates after rotation, Part 3 covers views hosted by another process, Part 4 times the server.
+Exercises every MCP tool against one simulator. Part 1 covers portrait, Part 2 verifies coordinates after rotation, Part 3 covers views hosted by another process, Part 4 covers controls whose frame is not the thing you can touch, Part 5 times the server.
 
 **Run this through the `mcp__ios-multi-simulator__*` tools, one call at a time.
 Do not script it without explicit permission.**
@@ -100,7 +100,9 @@ launch_app(id: "test-session", bundle_id: "com.example.mcptestapp")
 ui_view(id: "test-session")
 ```
 
-**Expected:** A screenshot showing a nav bar with **Nav Button**, a text field, **Plain Button**, a status label reading `status: ready`, an orientation label reading `orientation: interface=portrait device=portrait`, **Show In-App Modal**, **Ask Permission**, and a row of one-of-each controls (search bar, switch, slider, stepper, segmented control), and a bottom toolbar with **Toolbar Button** and a search field.
+**Expected:** A screenshot showing a nav bar with **Nav Button**, a text field, **Plain Button**, a status label reading `status: ready`, an orientation label reading `orientation: interface=portrait device=portrait`, **Show Login**, **Show Picker**, a Settings-shaped **Settings Switch** row and a plain **Split Switch** row, **Show In-App Modal**, **Ask Permission**, and a row of one-of-each controls (search bar, switch, slider, stepper, segmented control), and a bottom toolbar with **Toolbar Button** and a search field.
+
+The tail of that list runs past the fold — the stepper and segmented control sit below the toolbar and are not visible without scrolling. They are in the tree, which is what the steps below need.
 
 ### #10 ui_describe_all — the whole tree, including system chrome
 
@@ -437,7 +439,70 @@ destroy_simulator(id: "remote-test")
 
 ---
 
-## Part 4 — Round-trip timing
+## Part 4 — Toggles, by name and by coordinate
+
+A switch is the one control whose accessibility frame is routinely **not** the thing you can touch. A Settings row publishes one element spanning label and control, so its centre is the gap between them; and even a bare `UISwitch` inherits whatever width its layout gives it. Tapping the centre of either actuates nothing, and it never did — measured 0/6 and 0/8 on the pinned companion and the 2022 one alike.
+
+So `ui_tap {label}` operates a toggle through accessibility instead, the way VoiceOver does, while `ui_tap {x, y}` stays a real touch. **Both are checked here in one place, deliberately**: they are different mechanisms that can regress independently, and when a toggle stops working the first thing worth knowing is which of the two broke.
+
+### #43 Start a simulator and launch the fixture
+
+```
+start_simulator(id: "toggle-test", type: "iPhone")
+install_app(id: "toggle-test", app_path: "<repo>/testapp/build/MCPTestApp.app")
+launch_app(id: "toggle-test", bundle_id: "com.example.mcptestapp")
+```
+
+**Expected:** The fixture, with a Settings-shaped `Settings Switch` row — label left, switch right — a little below `Show Picker`.
+
+### #44 By name — the toggle must flip, and say so
+
+```
+ui_tap(id: "toggle-test", label: "Settings Switch")
+```
+
+**Expected:** `Toggled Settings Switch off -> on.`
+
+Three distinct failures hide behind this one line:
+
+- **`Tapped successfully`** means the element was not recognised as a toggle, so it was touched at its centre instead of activated. The state will not have changed. This is the original bug.
+- **`Activated Settings Switch through accessibility, but it is still off`** means activation reached the element and the element did nothing with it. That is an app-side gap rather than a tool one — a merged row that never implements activation cannot be worked by VoiceOver either — but check the fixture has not regressed into publishing a cell instead of the switch.
+- **`could not read its state back`** means the toggle flipped but the confirming lookup failed. Most likely something else on screen now matches the name.
+
+Run it twice more and confirm it round-trips — `on -> off`, then `off -> on`. The second call is the one that catches a read-back keyed on a label rather than an identifier: by then the status line reads `settings toggle = on`, and a lookup that matches loosely will find that sentence rather than the switch.
+
+### #45 By coordinate — a real touch must also flip it
+
+Read the switch's position off `ui_view` — **not** off the tree, whose frame spans the whole row and whose centre is the gap:
+
+```
+ui_view(id: "toggle-test")
+ui_tap(id: "toggle-test", x: <switch_x>, y: <switch_y>)
+ui_find(id: "toggle-test", label: "status:")
+```
+
+**Expected:** `Tapped successfully`, and the status line changes — `status: settings toggle = ...`, flipped from wherever #44 left it.
+
+This is the half that depends on a tap being **held**. An instantaneous touch actuates a switch about 40% of the time, so a coordinate tap that works once proves little; if this step is flaky, that floor has regressed rather than anything about toggles. See `MIN_TAP_HOLD_SECONDS`.
+
+### #46 The boundary: a name that is not a control
+
+```
+ui_tap(id: "toggle-test", label: "Split Switch")
+ui_find(id: "toggle-test", label: "status:")
+```
+
+**Expected:** `Tapped successfully`, and **the status line does not change**.
+
+That is correct, not a bug, and it is here so nobody later "fixes" it. `Split Switch` is a label and a switch in a plain container with nothing merging them, so iOS publishes two elements: a static text carrying the name, and an unnamed switch beside it. The name genuinely refers to the text. A VoiceOver user meets the same wall and moves on to the switch. The rule the tools follow is that they operate what iOS says the element *is* — and no amount of activation makes a label into a control.
+
+```
+destroy_simulator(id: "toggle-test")
+```
+
+---
+
+## Part 5 — Round-trip timing
 
 Measures how long the **server** takes, with no model in the loop. Driving the tools through an agent measures the agent; this measures the tool.
 
@@ -498,20 +563,20 @@ All tools tested:
 
 | Tool | Steps |
 |------|-------|
-| `start_simulator` | #1, #21, #23, #35 |
-| `destroy_simulator` | #21, #22, #34, #42 |
+| `start_simulator` | #1, #21, #23, #35, #43 |
+| `destroy_simulator` | #21, #22, #34, #42, #45 |
 | `attach_simulator` | #21 |
 | `rotate` | #26 |
 | `detect_rotation` | #27 |
 | `ui_describe_all` | #3, #10, #25, #29 |
-| `ui_find` | #11, #12, #13, #15, #30, #32, #33, #37, #40 |
-| `ui_tap` | #13, #14, #19, #30, #32, #33, #35, #39, #41 |
+| `ui_find` | #11, #12, #13, #15, #30, #32, #33, #37, #40, #45, #46 |
+| `ui_tap` | #13, #14, #19, #30, #32, #33, #35, #39, #41, #44, #45, #46 |
 | `ui_type` | #15, #33 |
 | `ui_swipe` | #5 |
 | `ui_describe_point` | #4, #16, #38 |
-| `ui_view` | #2, #6, #9, #24, #28, #31, #36, #39, #41 |
+| `ui_view` | #2, #6, #9, #24, #28, #31, #36, #39, #41, #45 |
 | `screenshot` | #17 |
 | `record_video` | #18 |
 | `stop_recording` | #20 |
-| `install_app` | #7, #23, #35 |
-| `launch_app` | #8, #23, #35, #40 |
+| `install_app` | #7, #23, #35, #43 |
+| `launch_app` | #8, #23, #35, #40, #43 |
