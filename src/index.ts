@@ -1567,6 +1567,30 @@ if (!isToolFiltered("ui_find")) {
   );
 }
 
+/**
+ * The shortest press that actually actuates a control.
+ *
+ * A tap with no hold is a touch-down and a touch-up in the same instant, and
+ * UIKit does not reliably see one. Measured against the Sound switch in
+ * Settings > General > Keyboard, tapping the control itself:
+ *
+ *   | companion       | instant | 0.1s hold |
+ *   |-----------------|---------|-----------|
+ *   | pinned da0f89a  |    5/12 |     12/12 |
+ *   | brew 1.1.8 (2022) |  1/10 |     10/10 |
+ *
+ * So this is not a regression in some version — an instantaneous touch has
+ * always been worth about a coin flip, and every tap this server has ever sent
+ * was one unless the caller thought to ask for a duration. It is the likeliest
+ * explanation for taps that "sometimes don't take".
+ *
+ * A floor rather than a default, because a caller passing a shorter press is
+ * asking for the unreliable behaviour by accident: the distinction that matters
+ * to them is tap versus long-press, and 0.1s is well under UIKit's 0.5s
+ * long-press threshold, so nothing that was a tap becomes one.
+ */
+const MIN_TAP_HOLD_SECONDS = 0.1;
+
 if (!isToolFiltered("ui_tap")) {
   server.tool(
     "ui_tap",
@@ -1577,7 +1601,9 @@ if (!isToolFiltered("ui_tap")) {
         .string()
         .regex(/^\d+(\.\d+)?$/)
         .optional()
-        .describe("Press duration"),
+        .describe(
+          "Press duration in seconds. Every tap is held for at least 0.1s, which is what makes it land; raise this for a long press."
+        ),
       label: z
         .string()
         .min(1)
@@ -1649,6 +1675,10 @@ if (!isToolFiltered("ui_tap")) {
         // Bound outside the closure so the narrowing above survives into it.
         const tapX = Math.round(x);
         const tapY = Math.round(y);
+        const hold = Math.max(
+          duration ? Number(duration) : 0,
+          MIN_TAP_HOLD_SECONDS
+        );
 
         // Exclusive: interleaving another session's input with a multi-tap
         // would turn a double-tap into two unrelated single taps.
@@ -1657,11 +1687,7 @@ if (!isToolFiltered("ui_tap")) {
           async (client) => {
             for (let i = 0; i < count; i++) {
               if (i > 0) await new Promise((r) => setTimeout(r, 50));
-              await client.tap(
-                tapX,
-                tapY,
-                duration ? Number(duration) : undefined
-              );
+              await client.tap(tapX, tapY, hold);
             }
           },
           { exclusive: true }
