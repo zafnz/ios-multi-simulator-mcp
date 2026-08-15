@@ -26,7 +26,10 @@ xcrun clang \
 	-isysroot "$SDK" \
 	-target "${ARCH}-apple-ios15.0-simulator" \
 	-framework UIKit -framework Foundation -framework UserNotifications \
+	-framework PhotosUI -framework ContactsUI \
 	-Wall \
+	-Xlinker -sectcreate -Xlinker __TEXT -Xlinker __entitlements \
+	-Xlinker entitlements.plist \
 	-o "$APP/MCPTestApp" \
 	main.m
 

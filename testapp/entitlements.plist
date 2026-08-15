@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  Without this, iOS will fill a saved password into this app but will never
+	  offer to generate one: "Cannot show Automatic Strong Passwords ... Cannot
+	  identify the calling app's process. Check teamID and bundleID in your
+	  app's application-identifier entitlement". Generating a password means
+	  saving it, saving it means the keychain, and an app with no
+	  application-identifier has no keychain identity to save under.
+
+	  The team prefix is invented. A simulator does not check it against a real
+	  Apple Developer team, which is what makes this fixture possible at all
+	  without an account -- see testapp/README.md.
+	-->
+	<key>application-identifier</key>
+	<string>MCPTEST000.com.example.mcptestapp</string>
+	<key>keychain-access-groups</key>
+	<array>
+		<string>MCPTEST000.com.example.mcptestapp</string>
+	</array>
+</dict>
+</plist>

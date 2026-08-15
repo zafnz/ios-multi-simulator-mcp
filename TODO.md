@@ -31,7 +31,36 @@
 
   **Try upstream first (the user's call, and the cheapest move).** We pin `da0f89a`; upstream has been active. Before building anything, run a current `idb_companion` against this exact screen and see whether remote frames are translated now — this is precisely the kind of thing their remote-content work would touch. If it is fixed there, this becomes a submodule bump. See #49 for how upstream releases are consumed, and note #36b — the searchbar issue we were going to add findings to — is adjacent.
 
-  **Reproducing needs a song and dance:** an app with `username` and `newPassword` field types, and password autofill enabled in Settings. `testapp/` could grow a login screen with the right `textContentType` values, which would make this a fixture case like the modal work in #53 — worth doing if we fix it rather than bumping.
+  **Reproducible in `testapp/` — recipe below, validated on a simulator created from scratch.**
+
+  The blocker was never the field configuration. `testapp` had `.username`, `.newPassword` and `secureTextEntry` from the first attempt, read back live from UIKit as `config: user=username pass=new-password secure=YES`, and iOS still would not offer a password. **What was missing was an `application-identifier` entitlement.** Offering to *generate* a password means offering to *save* it, saving means the keychain, and an app with no keychain identity is refused — the same failure Apple reports as *"Cannot show Automatic Strong Passwords ... Cannot identify the calling app's process. Check teamID and bundleID in your app's application-identifier entitlement"*. The reported app has exactly one entitlement, `application-identifier = 75KCDCRBC7.uk.whiskyreview.app`, in its binary's `__TEXT,__entitlements` section; ours had no such section at all. `testapp/entitlements.plist` now supplies one with an invented team prefix, which a simulator does not check, and `build.sh` embeds it the way Xcode does for simulator builds (`-Xlinker -sectcreate -Xlinker __TEXT -Xlinker __entitlements`).
+
+  **Recipe — four steps, no device preparation at all.**
+
+  1. `testapp/build.sh` — the entitlement must be in the binary. Check with
+     `otool -l testapp/build/MCPTestApp.app/MCPTestApp | grep -A2 __entitlements`.
+  2. `start_simulator`, then `install_app` and `launch_app` the fixture.
+  3. `ui_tap {label: "Show Login"}`, then `ui_tap {label: "Login Password"}`.
+  4. The **"Use Strong Password?"** sheet appears across the bottom of the screen.
+
+  **Validated on a simulator created from scratch for the purpose**, with nothing done to it beyond installing the fixture. Two beliefs held during the investigation turned out to be wrong, and the clean run is what settled them:
+
+  - **A saved password is not required.** The sheet appeared with an empty store — verified afterwards by opening the Passwords app on that same simulator and finding it still showing its first-run onboarding, then `All: 0`. The earlier belief came from testing on a simulator that had been primed by hand.
+  - **No Settings changes are required.** `AutoFill Passwords and Passkeys` and `Suggest Strong Passwords` are on by default; check them only when diagnosing a failure to reproduce.
+
+  A saved credential can in fact *prevent* the sheet: an entry for `example.com` fuzzy-matched the bundle id `com.example.mcptestapp`, and iOS answered with a *fill* suggestion for that credential instead of generating one. If a store has entries, keep them on sites that cannot match the fixture.
+
+  **What it then reports**, on a 402x874 screen with the sheet occupying roughly y=460 downwards:
+
+  ```
+  ui_find "Fill Strong Password"        -> frame y=239.3  =>  ui_tap would tap (201, 261)
+  ui_describe_point(201, 261)           -> "Login Submit"      <- what the tap actually hits
+  ui_describe_point(201, 738)           -> "Fill Strong Password", frame y=239.3 again
+  ```
+
+  So in the fixture the mis-tap is not merely harmless: `ui_tap {label: "Fill Strong Password"}` presses **Login Submit** and reports `Tapped successfully`.
+
+  Not needed, despite early guesses: the software keyboard (the sheet appears with a hardware keyboard attached), any Settings change beyond confirming the defaults, an associated domain, or a real Apple Developer team.
 
 # TODO — Code Review Findings
 

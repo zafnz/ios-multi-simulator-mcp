@@ -14,6 +14,8 @@
 //  `companion.lock.json` only.
 //
 
+#import <ContactsUI/ContactsUI.h>
+#import <PhotosUI/PhotosUI.h>
 #import <UIKit/UIKit.h>
 #import <UserNotifications/UserNotifications.h>
 
@@ -49,6 +51,84 @@ static NSString *DeviceOrientationName(UIDeviceOrientation o) {
     default: return @"unknown";
   }
 }
+
+#pragma mark - Login screen
+
+/// A sign-in screen whose only purpose is to make iOS put its own sheet on the
+/// screen (TODO.md #60).
+///
+/// A `newPassword` field next to a `username` field is what triggers the
+/// "Use Strong Password?" prompt, and that prompt is drawn by a *different
+/// process* in its own window — which is the condition under test: its elements
+/// arrive with frames in that window's coordinate space, not the screen's, so
+/// anything tapping them by label taps the wrong place.
+///
+/// Needs AutoFill Passwords enabled in Settings; see TESTING_SERVER.md.
+@interface LoginViewController : UIViewController
+@property(nonatomic, strong) UITextField *email;
+@property(nonatomic, strong) UITextField *password;
+@end
+
+@implementation LoginViewController
+
+- (void)viewDidLoad {
+  [super viewDidLoad];
+  self.view.backgroundColor = UIColor.systemBackgroundColor;
+  self.title = @"Sign In";
+
+  self.email = [[UITextField alloc] init];
+  self.email.placeholder = @"Email";
+  self.email.borderStyle = UITextBorderStyleRoundedRect;
+  self.email.textContentType = UITextContentTypeUsername;
+  self.email.keyboardType = UIKeyboardTypeEmailAddress;
+  self.email.autocapitalizationType = UITextAutocapitalizationTypeNone;
+  self.email.accessibilityLabel = @"Login Email";
+  self.email.accessibilityIdentifier = @"LoginEmailField";
+
+  // The one line that matters: `newPassword` is what asks iOS for a suggestion.
+  self.password = [[UITextField alloc] init];
+  self.password.placeholder = @"Password";
+  self.password.borderStyle = UITextBorderStyleRoundedRect;
+  self.password.secureTextEntry = YES;
+  self.password.textContentType = UITextContentTypeNewPassword;
+  self.password.accessibilityLabel = @"Login Password";
+  self.password.accessibilityIdentifier = @"LoginPasswordField";
+
+  UIButton *submit = [UIButton buttonWithType:UIButtonTypeSystem];
+  [submit setTitle:@"Login Submit" forState:UIControlStateNormal];
+  submit.accessibilityIdentifier = @"LoginSubmitButton";
+
+  // What the fields actually ended up configured as, read back from UIKit
+  // rather than assumed from the code above. iOS decides between "fill a saved
+  // credential" and "offer a new strong password" from these, and there is no
+  // other way to see them from outside the app.
+  UILabel *config = [[UILabel alloc] init];
+  config.numberOfLines = 0;
+  config.font = [UIFont systemFontOfSize:12];
+  config.textColor = UIColor.secondaryLabelColor;
+  config.accessibilityIdentifier = @"LoginConfigLabel";
+  config.text = [NSString
+      stringWithFormat:@"config: user=%@ pass=%@ secure=%@",
+                       self.email.textContentType ?: @"(nil)",
+                       self.password.textContentType ?: @"(nil)",
+                       self.password.isSecureTextEntry ? @"YES" : @"NO"];
+
+  UIStackView *stack = [[UIStackView alloc]
+      initWithArrangedSubviews:@[ self.email, self.password, submit, config ]];
+  stack.axis = UILayoutConstraintAxisVertical;
+  stack.spacing = 16;
+  stack.translatesAutoresizingMaskIntoConstraints = NO;
+  [self.view addSubview:stack];
+
+  UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
+  [NSLayoutConstraint activateConstraints:@[
+    [stack.topAnchor constraintEqualToAnchor:safe.topAnchor constant:40],
+    [stack.centerXAnchor constraintEqualToAnchor:safe.centerXAnchor],
+    [stack.widthAnchor constraintEqualToConstant:280],
+  ]];
+}
+
+@end
 
 #pragma mark - Root view controller
 
@@ -193,19 +273,57 @@ static NSString *DeviceOrientationName(UIDeviceOrientation o) {
   segmented.selectedSegmentIndex = 0;
   segmented.accessibilityIdentifier = @"PlainSegmented";
 
+  // These live in the scrolling content, not the nav bar. Two extra bar items
+  // were enough to make UIKit collapse `Nav Button` into an overflow menu,
+  // which quietly removed the one nav-bar control the test plan taps.
+  UIButton *login = [UIButton buttonWithType:UIButtonTypeSystem];
+  [login setTitle:@"Show Login" forState:UIControlStateNormal];
+  [login addTarget:self
+                action:@selector(showLogin)
+      forControlEvents:UIControlEventTouchUpInside];
+  login.accessibilityIdentifier = @"ShowLoginButton";
+
+  UIButton *picker = [UIButton buttonWithType:UIButtonTypeSystem];
+  [picker setTitle:@"Show Picker" forState:UIControlStateNormal];
+  [picker addTarget:self
+                 action:@selector(showPhotoPicker)
+       forControlEvents:UIControlEventTouchUpInside];
+  picker.accessibilityIdentifier = @"ShowPickerButton";
+
   UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[
-    self.plainField, plainButton, self.status, self.orientation, inAppModal,
-    systemModal, searchBar, toggle, slider, stepper, segmented
+    // `login` and `picker` sit high up on purpose: they open the screens other
+    // tests start from, and a control that needs scrolling to reach is a
+    // control whose test can fail for a reason that is not the tool.
+    self.plainField, plainButton, self.status, self.orientation, login, picker,
+    inAppModal, systemModal, searchBar, toggle, slider, stepper, segmented
   ]];
   stack.axis = UILayoutConstraintAxisVertical;
   stack.spacing = 24;
   stack.translatesAutoresizingMaskIntoConstraints = NO;
-  [self.view addSubview:stack];
+
+  // Scrolling, because the fixture keeps growing and a control that ends up
+  // under the toolbar is not merely hard to see: a tap at its centre lands on
+  // the toolbar, and the test reads as a tool failure rather than a layout one.
+  UIScrollView *scroll = [[UIScrollView alloc] init];
+  scroll.translatesAutoresizingMaskIntoConstraints = NO;
+  scroll.accessibilityIdentifier = @"ContentScroll";
+  [scroll addSubview:stack];
+  [self.view addSubview:scroll];
 
   UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
   [NSLayoutConstraint activateConstraints:@[
-    [stack.topAnchor constraintEqualToAnchor:safe.topAnchor constant:40],
-    [stack.centerXAnchor constraintEqualToAnchor:safe.centerXAnchor],
+    [scroll.topAnchor constraintEqualToAnchor:safe.topAnchor],
+    [scroll.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor],
+    [scroll.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],
+    [scroll.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],
+
+    [stack.topAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.topAnchor
+                                    constant:40],
+    [stack.bottomAnchor
+        constraintEqualToAnchor:scroll.contentLayoutGuide.bottomAnchor
+                       constant:-40],
+    [stack.centerXAnchor
+        constraintEqualToAnchor:scroll.frameLayoutGuide.centerXAnchor],
     [stack.widthAnchor constraintEqualToConstant:280],
   ]];
 }
@@ -273,6 +391,46 @@ static NSString *DeviceOrientationName(UIDeviceOrientation o) {
 }
 - (void)plainButtonTapped {
   [self report:@"tapped Plain Button"];
+}
+
+- (void)showLogin {
+  [self report:@"showing Login"];
+  [self.navigationController pushViewController:[[LoginViewController alloc] init]
+                                       animated:YES];
+}
+
+/// A picker drawn by another process and embedded in *this* app's window — the
+/// shape that TODO.md #60 is about.
+///
+/// Not every out-of-process UI has the bug: the notification permission alert
+/// is a separate process too and reports perfectly good screen coordinates,
+/// because it owns its window. It is the *embedded* remote view controller
+/// whose elements arrive in their own window's coordinate space. `PHPicker` is
+/// the cheapest one to raise: no permission prompt by design, and no trip
+/// through Settings, unlike the password suggestion sheet that was reported.
+- (void)showPhotoPicker {
+  [self report:@"showing Photo Picker"];
+  PHPickerConfiguration *config = [[PHPickerConfiguration alloc] init];
+  config.selectionLimit = 1;
+  PHPickerViewController *picker =
+      [[PHPickerViewController alloc] initWithConfiguration:config];
+  picker.delegate = (id<PHPickerViewControllerDelegate>)self;
+  [self presentViewController:picker animated:YES completion:nil];
+}
+
+- (void)picker:(PHPickerViewController *)picker
+    didFinishPicking:(NSArray<PHPickerResult *> *)results {
+  [picker dismissViewControllerAnimated:YES completion:nil];
+  [self report:@"dismissed Photo Picker"];
+}
+
+/// A second embedded remote view controller, for when the picker is not
+/// available or behaves differently on a given runtime.
+- (void)showContactPicker {
+  [self report:@"showing Contact Picker"];
+  CNContactPickerViewController *picker =
+      [[CNContactPickerViewController alloc] init];
+  [self presentViewController:picker animated:YES completion:nil];
 }
 
 /// An alert in this app's own process. The frontmost application does not change.
