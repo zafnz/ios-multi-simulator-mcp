@@ -567,6 +567,7 @@ time_tool ui_view           '{"id":"rtt"}'
 | Call | Order of magnitude |
 |---|---|
 | `ui_tap` by coordinate | **100–150 ms** — the 100 ms hold, plus the round trip |
+| `ui_tap` by label | ~145 ms — the above, plus the lookup and the hit-test that verifies it |
 | `ui_describe_point` | under 50 ms |
 | `ui_find`, name present in the cheap tree | ~25 ms |
 | `ui_find`, name absent — falls back | ~300 ms |
