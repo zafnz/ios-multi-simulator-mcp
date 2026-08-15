@@ -18,11 +18,14 @@ import {
   canonicalise,
   centreOf,
   collectProbeCandidates,
+  frameContains,
   isDegenerateTree,
+  locateInTree,
   matchInTree,
   POINT_KEYS,
   pruneTree,
   reconcileType,
+  translateRemoteSubtrees,
   uniquelyLabelled,
 } from "./ax/tree";
 import {
@@ -160,7 +163,8 @@ async function describeScreen(udid: string): Promise<AXElement[]> {
   );
 
   if (!isDegenerateTree(elements)) markAccessibilityAnswered(udid);
-  return pruneTree(elements);
+  // Before pruning, which discards the parents this reads the offset from.
+  return pruneTree(translateRemoteSubtrees(elements));
 }
 
 /**
@@ -1817,7 +1821,28 @@ if (!isToolFiltered("ui_describe_point")) {
           portraitY = pt.y;
         }
 
-        const element = await describePoint(sim.udid, portraitX, portraitY);
+        let element = await describePoint(sim.udid, portraitX, portraitY);
+
+        // A frame that does not cover the point it was found at is the
+        // signature of a remote-hosted view: the hit-test is right, the frame
+        // is measured from the hosting window rather than the screen. The tree
+        // read that corrects it costs ~350ms, so it is paid only here, on the
+        // reads that are otherwise wrong — and only to replace the rectangle,
+        // never the identity, which the point read established by hit-testing.
+        if (element?.frame && !frameContains(element.frame, x, y)) {
+          try {
+            const corrected = locateInTree(
+              await describeScreen(sim.udid),
+              element,
+              x,
+              y
+            );
+            if (corrected) element = { ...element, frame: corrected };
+          } catch {
+            // Best effort: the point read's own answer beats an error about a
+            // second read the caller never asked for.
+          }
+        }
 
         // Already in logical screen space
         return {

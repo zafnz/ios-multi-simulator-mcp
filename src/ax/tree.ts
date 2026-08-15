@@ -195,6 +195,170 @@ export function isInteresting(element: AXElement): boolean {
 }
 
 /**
+ * The element type that marks the boundary into a remote view's own coordinate
+ * space.
+ *
+ * It is a bare number because it has no name: `type` is the normalised role,
+ * and this role falls outside the vocabulary idb maps, so it arrives
+ * stringified. Undocumented, and matched here anyway because it is the only
+ * signal in the tree — `is_remote` is never emitted by the AXBridge backend,
+ * and every node in a tree containing one of these still reports the host
+ * application's `pid`. See `translateRemoteSubtrees`.
+ */
+const REMOTE_HOST_TYPE = "83";
+
+/**
+ * Rebases the contents of remote-hosted views into screen coordinates.
+ *
+ * iOS draws some UI — the "Use Strong Password?" autofill sheet, photo and
+ * document pickers, share sheets — from a separate process, hosted inside the
+ * app's window. Their elements arrive in one tree with the app's own, with
+ * nothing distinguishing them, but their frames are measured from the hosting
+ * window's origin rather than the screen's. One tree, two coordinate spaces.
+ *
+ * Untranslated, this is not a cosmetic error: `ui_tap {label}` resolves the
+ * label to such a frame, taps its centre, and reports success while the touch
+ * lands 476 points away on whatever the app has there — in the fixture, the
+ * autofill sheet's "Fill Strong Password" tapped "Login Submit". The caller is
+ * told it worked, and the tree that would contradict it is the same tree that
+ * was wrong.
+ *
+ * The offset is not lost, though: at the boundary node the subtree restarts at
+ * a local origin while the node's parent still describes that same region in
+ * screen space. Both rectangles are the same size — they are the same region,
+ * named twice — so the difference between their origins is exactly the
+ * translation the subtree needs, and it costs a tree walk we have already paid
+ * to receive rather than the round of hit-test probing it would otherwise take
+ * to recover.
+ *
+ * That matching size is also the guard: the type alone is an undocumented
+ * number, so it is required to agree with the geometry before anything moves.
+ * A boundary node whose size does not match its parent's is left alone, as is a
+ * root one, which has no parent to be measured against. When the hosting window
+ * sits at the screen's origin the offset comes out zero and the walk is a no-op
+ * — the common case for a full-screen picker, and the reason this cannot be
+ * written as "sheets are wrong, shift them".
+ *
+ * Must run on the raw tree, before `pruneTree`: pruning drops anonymous
+ * containers and hoists their children, which discards the very parent whose
+ * origin this reads.
+ */
+export function translateRemoteSubtrees(elements: AXElement[]): AXElement[] {
+  const shift = (frame: Frame, dx: number, dy: number): Frame => ({
+    ...frame,
+    x: frame.x + dx,
+    y: frame.y + dy,
+  });
+
+  // Same rectangle to within the sub-point noise the tree is full of: frames
+  // arrive as thirds of a point (44.333…), so an exact comparison would reject
+  // rectangles that are equal in every sense that matters here.
+  const sameSize = (a: Frame, b: Frame): boolean =>
+    Math.abs(a.width - b.width) < 1 && Math.abs(a.height - b.height) < 1;
+
+  const visit = (
+    element: AXElement,
+    dx: number,
+    dy: number,
+    parent: Frame | null
+  ): AXElement => {
+    const frame = element.frame;
+
+    // A new local space starts here, so the inherited offset is replaced rather
+    // than added to. `parent` is already in screen space, having been shifted
+    // on the way down, which is what makes nested hosts fall out of the same
+    // arithmetic instead of needing a special case.
+    if (
+      element.type === REMOTE_HOST_TYPE &&
+      frame &&
+      parent &&
+      sameSize(frame, parent)
+    ) {
+      dx = parent.x - frame.x;
+      dy = parent.y - frame.y;
+    }
+
+    const moved = frame ? shift(frame, dx, dy) : undefined;
+    const out: AXElement = moved ? { ...element, frame: moved } : { ...element };
+    if (element.children?.length) {
+      out.children = element.children.map((child) =>
+        visit(child, dx, dy, moved ?? parent)
+      );
+    }
+    return out;
+  };
+
+  return elements.map((root) => visit(root, 0, 0, null));
+}
+
+/** True when the point falls inside the frame, edges included. */
+export function frameContains(frame: Frame, x: number, y: number): boolean {
+  return (
+    x >= frame.x &&
+    x <= frame.x + frame.width &&
+    y >= frame.y &&
+    y <= frame.y + frame.height
+  );
+}
+
+/**
+ * Finds the corrected frame for an element a point read has located but
+ * mislaid.
+ *
+ * A point read hit-tests, so it names the right element wherever it lives — but
+ * it returns one element and no ancestry, and the ancestry is where the
+ * translation in `translateRemoteSubtrees` comes from. For a control inside a
+ * remote-hosted view it therefore answers with the local frame, which is how
+ * this bug was first measured: a read at the button's true position returned
+ * the button, still claiming to be 476 points higher up.
+ *
+ * The tree has the corrected frame, so the two are matched here. Identity comes
+ * from the identifier or the label — not position, which is the thing in
+ * dispute — and the candidate must also be the right size and actually cover
+ * the point that was asked about. That last condition is what makes a wrong
+ * answer fail closed: a screen with two identically-named buttons resolves to
+ * the one under the caller's finger, or to neither.
+ *
+ * Returns null when nothing matches, leaving the caller to report the element
+ * as the point read described it.
+ */
+export function locateInTree(
+  elements: AXElement[],
+  element: AXElement,
+  x: number,
+  y: number
+): Frame | null {
+  const wanted = element.frame;
+  if (!wanted) return null;
+
+  const id = element.AXUniqueId;
+  const label = element.AXLabel;
+  const identifies = (candidate: AXElement): boolean =>
+    id != null && id !== ""
+      ? candidate.AXUniqueId === id
+      : label != null && label !== "" && candidate.AXLabel === label;
+
+  let found: Frame | null = null;
+  const visit = (candidate: AXElement): void => {
+    if (found) return;
+    const frame = candidate.frame;
+    if (
+      frame &&
+      identifies(candidate) &&
+      Math.abs(frame.width - wanted.width) < 1 &&
+      Math.abs(frame.height - wanted.height) < 1 &&
+      frameContains(frame, x, y)
+    ) {
+      found = frame;
+      return;
+    }
+    for (const child of candidate.children ?? []) visit(child);
+  };
+  for (const root of elements) visit(root);
+  return found;
+}
+
+/**
  * Drops the structural scaffolding from a tree, keeping what a caller can act
  * on. A dropped node's kept descendants are hoisted to its nearest kept
  * ancestor, so pruning never orphans a control — it only shortens the path to

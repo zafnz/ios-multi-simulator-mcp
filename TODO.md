@@ -1,6 +1,41 @@
 # TODO — Production bug, reported 2026-08-15
 
-- [ ] **#60 HIGH PRIORITY. Elements inside a remote-view sheet report frames in the sheet's own coordinate space, so `ui_tap {label}` taps the wrong place and says it succeeded.**
+- [x] **#60 FIXED 2026-08-15. The offset was in the tree all along, and we were throwing it away.**
+
+  **Root cause.** A remote-hosted view's contents are not simply "in another coordinate space with nothing marking the boundary" — the boundary is a node of `type: "83"`, and it is the point at which the subtree restarts at a local origin. Its *parent* still describes that same region in screen space, and the two rectangles are the same size, because they are the same region named twice. The difference between their origins is the translation, exactly:
+
+  ```
+  Any "" {x:0 y:476 w:402 h:340}        <- hosting window, screen space
+    83  "" {x:0 y:0   w:402 h:340}      <- boundary: same size, origin reset
+          Button "Close"                {x:351 y:16  ...}   -> screen y=492
+          Button "Fill Strong Password" {x:36  y:239 ...}   -> screen y=715.33
+  ```
+
+  `239.33 + 476 + 22 = 737.33`, which is where the button is. **No probing, no hit-testing, no extra RPC** — candidate fix 2 below assumed ~30 point reads to recover an offset the tree already carried. What hid it was our own `pruneTree`: it drops anonymous containers and hoists their children, which discards the very parent the offset is measured against. The old flat tree was the pruned one.
+
+  **Why the type check alone was not trusted.** `83` is a bare number because it has no name — it falls outside the role vocabulary idb maps, so it arrives stringified — and an undocumented magic number is a poor thing to move coordinates on. So the geometry has to agree before anything moves: the boundary node's size must match its parent's. That guard is what makes the arithmetic self-validating, and it is what the second test case below exercises.
+
+  **Verified on two remote-hosted views, which differ in the way that matters:**
+
+  | view | hosting window | offset | tree before | tree after |
+  |---|---|---|---|---|
+  | "Use Strong Password?" sheet | `{0, 476}` | (0, 476) | y=239.33 **wrong** | y=715.33 ✓ |
+  | photo picker (`PHPicker`) | `{0, 0}` | (0, 0) | y=86 **already right** | y=86, untouched ✓ |
+
+  The picker is the case that kills "sheets are wrong, shift them": it is hosted exactly the same way and its frames are already correct, because its window is at the screen origin. Both fall out of the one formula. Confirmed by hit-test: the picker's `Collections` at its reported centre (248, 110) resolves to `Collections`, and tapping it switched the picker to Collections.
+
+  **End to end, on a simulator created from scratch:** `ui_tap {label: "Fill Strong Password"}` now presses the button — the sheet dismisses and the password field fills with a generated password. It previously pressed **Login Submit** and reported `Tapped successfully`.
+
+  **`ui_describe_point` was fixed too, because the tree fix would otherwise have broken it.** A point read hit-tests, so it names the right element wherever it lives, but it returns one element and no ancestry — and the ancestry is where the offset comes from. It therefore kept answering `y=239.33` while the tree said `715.33`, which is a fresh instance of exactly what #58 was closed to prevent. A frame that does not cover the point it was found at is the signature, and it is free to check; on that signal only, the tree is read and the frame replaced (never the identity, which the hit-test established). Costs ~350ms on the broken path and nothing on every other read — verified: `Login Submit` at (201, 271) still answers straight from the point read. Both tools now report `y=715.33` for the same button.
+
+  **Implementation:** `translateRemoteSubtrees` and `locateInTree` in [src/ax/tree.ts](src/ax/tree.ts), pure and unit tested (103 assertions, ~100ms). `describeScreen` translates before pruning. The tests were checked against three deliberate mutations — dropping the size guard, reversing the offset sign, and accumulating the offset instead of replacing it at each boundary — which failed 2, 4 and 2 assertions respectively.
+
+  **What is not covered.** An AXBRIDGE *marker* query returns local frames too (confirmed: it finds the button at y=239.33 where the AX marker query finds nothing at all). It is not reachable today — `findByLabel` only ever sends markers to the AX backend, and its miss is what routes these lookups through the corrected tree — so this is a note for whoever changes that, not a live bug.
+
+  <details>
+  <summary>Original report and investigation, kept as the record</summary>
+
+- [x] **#60 (original) Elements inside a remote-view sheet report frames in the sheet's own coordinate space, so `ui_tap {label}` taps the wrong place and says it succeeded.**
 
   Reported from production: an agent on a login screen, with iOS's **"Use Strong Password?"** autofill sheet up, was given a tree whose frames disagreed with the screen. It diagnosed the cause itself and was right.
 
@@ -61,6 +96,29 @@
   So in the fixture the mis-tap is not merely harmless: `ui_tap {label: "Fill Strong Password"}` presses **Login Submit** and reports `Tapped successfully`.
 
   Not needed, despite early guesses: the software keyboard (the sheet appears with a hardware keyboard attached), any Settings change beyond confirming the defaults, an associated domain, or a real Apple Developer team.
+
+  </details>
+
+  **Searched for prior art before building anything — we are not the only ones, and nobody has fixed it.**
+
+  - **Appium hits the same class through an entirely different toolchain.** Their XCUITest driver documents it as a standing limitation: elements belonging to another process have coordinates in that process's own context, and their answer is not to translate but to *switch which application is active* (`respectSystemAlerts`, `defaultActiveApplication`, `mobile: activateApp` on springboard) — see [their troubleshooting guide](https://appium.github.io/appium-xcuitest-driver/latest/troubleshooting/). [appium/appium#11324](https://github.com/appium/appium/issues/11324), "incorrect element location for native Share dialog buttons", is our bug in a share sheet: coordinates found, taps land elsewhere, manual coordinates off a screenshot work. Open, unresolved. That it reproduces through WDA/XCUITest and not just idb is what says this is Apple's layer, not idb's — and it is why "try a newer companion first" was never likely to pay.
+  - **Nobody publishes a translation.** No fix in idb, WDA, Maestro or Mixbox. [facebook/idb#892](https://github.com/facebook/idb/issues/892) (the #36b searchbar issue) is still the closest neighbour and still unanswered.
+  - **The `simctl` recipes for suppressing the sheet that circulate are cargo cult.** Both were tested on iOS 26.5 against the fixture, and **neither has any effect** — the sheet appears exactly as before, verified by `ui_find` still returning the button:
+
+    ```bash
+    xcrun simctl spawn "$UDID" defaults write com.apple.UIKit.StartUpOptions DidShowStrongPasswordIntroduction -bool true   # no effect
+    xcrun simctl spawn "$UDID" defaults write com.apple.Passwords AutoFillPromptDisabled -bool YES                          # no effect
+    ```
+
+    Both writes land (`defaults read` confirms), and `com.apple.Passwords` had no such key beforehand, which is the tell that nothing reads it. `killall cfprefsd` — the step every blog post insists is the one people miss — **does not exist in the guest**, so that advice cannot be followed as written either. Apple's own forum thread on this ([728529](https://developer.apple.com/forums/thread/728529)) has one reply in three years and no solution.
+  - **Suppression was the wrong goal anyway**, which is worth recording because it is where an afternoon could have gone. Turning autofill off would hide one instance of a bug that belongs to every remote-hosted view — pickers, share sheets, Sign in with Apple — and would change the behaviour of the app under test. The fix above is indifferent to which one is on screen.
+
+# TODO — Observed 2026-08-15
+
+- [ ] **#61 `scripts/imsmd.sh restart` deletes every simulator the server created, and CLAUDE.md tells you to run it after every build.** Hit during #60: restarting to pick up a build destroyed `clean_iphone`, the simulator the previous session had created and validated the #60 reproduction on. The mechanism is correct in isolation — the daemon's exit runs `cleanupAllSimulators`, which deletes `owned: true` simulators, and that is what stops a day's work leaking simulators. It is the combination that bites: "restart after every build, or you are testing the old one" plus "restart deletes your fixture" means every code change costs a simulator, a 40s boot, an install and a re-run of whatever state you were holding.
+  - Not a hypothetical cost: #60 was verified twice, and each verification cost a fresh simulator because the build in between required a restart.
+  - `attach_simulator` is the escape — an attached simulator is `owned: false` and survives — but that means creating it outside the server, which the tool descriptions otherwise tell agents not to do. Worth either saying so explicitly in CLAUDE.md, or giving the server a way to keep a simulator across a restart (a `--keep` on stop, or persisting the session registry so a restarted daemon re-adopts what it owned).
+  - Whatever the fix, CLAUDE.md's "restart after every build" line should carry the warning, because the failure is silent: the simulator is simply gone next time you look.
 
 # TODO — Code Review Findings
 

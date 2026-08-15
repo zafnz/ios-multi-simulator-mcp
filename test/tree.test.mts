@@ -6,12 +6,15 @@ import {
   canonicalise,
   centreOf,
   collectProbeCandidates,
+  frameContains,
   isDegenerateTree,
   isInteresting,
+  locateInTree,
   matchInTree,
   normaliseForMatch,
   pruneTree,
   reconcileType,
+  translateRemoteSubtrees,
   uniquelyLabelled,
 } from "../src/ax/tree.ts";
 
@@ -205,6 +208,284 @@ test("isInteresting", async (t) => {
   await t.test("an anonymous container is noise", () => {
     assert.equal(isInteresting({ type: "Group" }), false);
     assert.equal(isInteresting({}), false);
+  });
+});
+
+// The geometry here is transcribed from real reads, not invented: an iPhone 17
+// Pro (402x874) showing the fixture's login screen with iOS's "Use Strong
+// Password?" sheet up, and the same device showing the photo picker. The two
+// differ in the one way that matters — the autofill sheet's window sits at
+// y=476, the picker's at the screen origin — so together they pin down both
+// that the translation happens and that it is not applied blindly.
+const autofillSheet = (): AXElement[] => [
+  {
+    type: "Application",
+    frame: { x: 0, y: 0, width: 402, height: 874 },
+    children: [
+      {
+        type: "Button",
+        AXLabel: "Login Submit",
+        frame: { x: 61, y: 256, width: 280, height: 30 },
+      },
+      {
+        // The hosting window, in screen space.
+        type: "Any",
+        frame: { x: 0, y: 476, width: 402, height: 340 },
+        children: [
+          {
+            // The boundary: same rectangle, named again from its own origin.
+            type: "83",
+            frame: { x: 0, y: 0, width: 402, height: 340 },
+            children: [
+              {
+                type: "Button",
+                AXLabel: "Close",
+                AXUniqueId: "xmark",
+                frame: { x: 350.67, y: 16, width: 29.33, height: 29.33 },
+              },
+              {
+                type: "Button",
+                AXLabel: "Fill Strong Password",
+                AXUniqueId: "GenerateStrongPasswordButton",
+                frame: { x: 36, y: 239.33, width: 330, height: 44 },
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  },
+];
+
+const find = (elements: AXElement[], label: string): AXElement | undefined => {
+  for (const element of elements) {
+    if (element.AXLabel === label) return element;
+    const hit = find(element.children ?? [], label);
+    if (hit) return hit;
+  }
+  return undefined;
+};
+
+test("translateRemoteSubtrees", async (t) => {
+  // The bug this exists for, in one assertion: 239.33 + 22 = 261 is what the
+  // tree said and where the tap landed (on "Login Submit"); 715.33 + 22 = 737
+  // is where the button actually is.
+  await t.test("rebases a hosted sheet's contents into screen space", () => {
+    const button = find(
+      translateRemoteSubtrees(autofillSheet()),
+      "Fill Strong Password"
+    );
+    assert.deepEqual(button?.frame, {
+      x: 36,
+      y: 715.33,
+      width: 330,
+      height: 44,
+    });
+  });
+
+  await t.test("moves every element of the subtree by the same offset", () => {
+    const close = find(translateRemoteSubtrees(autofillSheet()), "Close");
+    assert.equal(close?.frame?.y, 492);
+    assert.equal(close?.frame?.x, 350.67); // x is untouched: the window is at x=0
+  });
+
+  await t.test("leaves the app's own elements alone", () => {
+    const submit = find(translateRemoteSubtrees(autofillSheet()), "Login Submit");
+    assert.deepEqual(submit?.frame, { x: 61, y: 256, width: 280, height: 30 });
+  });
+
+  // A full-screen picker is hosted exactly the same way, and its frames are
+  // already correct. If this became a shift, every picker would break.
+  await t.test("is a no-op when the hosting window is at the origin", () => {
+    const tree: AXElement[] = [
+      {
+        type: "Application",
+        frame: { x: 0, y: 0, width: 402, height: 874 },
+        children: [
+          {
+            type: "Any",
+            frame: { x: 0, y: 0, width: 402, height: 874 },
+            children: [
+              {
+                type: "83",
+                frame: { x: 0, y: 0, width: 402, height: 874 },
+                children: [
+                  {
+                    type: "Button",
+                    AXLabel: "Collections",
+                    frame: { x: 201, y: 86, width: 95, height: 48 },
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ];
+    const collections = find(translateRemoteSubtrees(tree), "Collections");
+    assert.deepEqual(collections?.frame, {
+      x: 201,
+      y: 86,
+      width: 95,
+      height: 48,
+    });
+  });
+
+  // Real trees carry these next to the live one. Without the size guard each
+  // would drag its subtree by its parent's whole origin.
+  await t.test("ignores a boundary node that does not match its parent", () => {
+    const tree: AXElement[] = [
+      {
+        type: "Any",
+        frame: { x: 0, y: 476, width: 402, height: 340 },
+        children: [
+          {
+            type: "83",
+            frame: { x: 0, y: 0, width: 0, height: 0 },
+            children: [
+              {
+                type: "Button",
+                AXLabel: "Ghost",
+                frame: { x: 10, y: 10, width: 40, height: 40 },
+              },
+            ],
+          },
+        ],
+      },
+    ];
+    const ghost = find(translateRemoteSubtrees(tree), "Ghost");
+    assert.deepEqual(ghost?.frame, { x: 10, y: 10, width: 40, height: 40 });
+  });
+
+  await t.test("leaves a boundary node with no parent alone", () => {
+    const tree: AXElement[] = [
+      {
+        type: "83",
+        frame: { x: 0, y: 0, width: 402, height: 874 },
+        children: [
+          {
+            type: "Button",
+            AXLabel: "Root child",
+            frame: { x: 5, y: 5, width: 10, height: 10 },
+          },
+        ],
+      },
+    ];
+    const child = find(translateRemoteSubtrees(tree), "Root child");
+    assert.deepEqual(child?.frame, { x: 5, y: 5, width: 10, height: 10 });
+  });
+
+  // A host inside a host: the inner offset is measured against the outer one's
+  // already-corrected parent, so the two compose instead of stacking.
+  await t.test("composes nested hosts rather than accumulating them", () => {
+    const tree: AXElement[] = [
+      {
+        type: "Any",
+        frame: { x: 0, y: 100, width: 200, height: 200 },
+        children: [
+          {
+            type: "83",
+            frame: { x: 0, y: 0, width: 200, height: 200 },
+            children: [
+              {
+                // Sits at y=50 inside the outer host, so y=150 on screen.
+                type: "Any",
+                frame: { x: 0, y: 50, width: 200, height: 150 },
+                children: [
+                  {
+                    type: "83",
+                    frame: { x: 0, y: 0, width: 200, height: 150 },
+                    children: [
+                      {
+                        type: "Button",
+                        AXLabel: "Inner",
+                        frame: { x: 10, y: 20, width: 30, height: 30 },
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ];
+    const inner = find(translateRemoteSubtrees(tree), "Inner");
+    // 20 inside the inner host, which starts at 150 on screen.
+    assert.equal(inner?.frame?.y, 170);
+  });
+
+  await t.test("does not mutate the tree it is given", () => {
+    const original = autofillSheet();
+    translateRemoteSubtrees(original);
+    assert.equal(find(original, "Fill Strong Password")?.frame?.y, 239.33);
+  });
+});
+
+test("locateInTree", async (t) => {
+  // The corrected tree, as `translateRemoteSubtrees` leaves it.
+  const corrected = () => translateRemoteSubtrees(autofillSheet());
+
+  // What a point read at the button's true position returns: the right
+  // element, carrying the frame it has 476 points further up the screen.
+  const asPointRead = (): AXElement => ({
+    type: "Button",
+    AXLabel: "Fill Strong Password",
+    AXUniqueId: "GenerateStrongPasswordButton",
+    frame: { x: 36, y: 239.33, width: 330, height: 44 },
+  });
+
+  await t.test("recovers the screen-space frame by identifier", () => {
+    const frame = locateInTree(corrected(), asPointRead(), 201, 737);
+    assert.equal(frame?.y, 715.33);
+  });
+
+  await t.test("matches on label when there is no identifier", () => {
+    const element = { ...asPointRead(), AXUniqueId: undefined };
+    const frame = locateInTree(corrected(), element, 201, 737);
+    assert.equal(frame?.y, 715.33);
+  });
+
+  // Fail closed: a candidate that does not cover the point is not the element
+  // the caller hit, whatever it is called.
+  await t.test("rejects a match that does not cover the point", () => {
+    assert.equal(locateInTree(corrected(), asPointRead(), 201, 100), null);
+  });
+
+  await t.test("rejects a match of the wrong size", () => {
+    const element = {
+      ...asPointRead(),
+      frame: { x: 36, y: 239.33, width: 100, height: 44 },
+    };
+    assert.equal(locateInTree(corrected(), element, 201, 737), null);
+  });
+
+  await t.test("returns null when the element is not in the tree", () => {
+    const element = { ...asPointRead(), AXUniqueId: "NotOnScreen" };
+    assert.equal(locateInTree(corrected(), element, 201, 737), null);
+  });
+
+  await t.test("declines to guess without a frame to match against", () => {
+    const element = { ...asPointRead(), frame: undefined };
+    assert.equal(locateInTree(corrected(), element, 201, 737), null);
+  });
+});
+
+test("frameContains", async (t) => {
+  const frame = { x: 10, y: 20, width: 100, height: 50 };
+
+  await t.test("a point inside", () => {
+    assert.equal(frameContains(frame, 50, 40), true);
+  });
+
+  await t.test("edges count as inside", () => {
+    assert.equal(frameContains(frame, 10, 20), true);
+    assert.equal(frameContains(frame, 110, 70), true);
+  });
+
+  await t.test("a point outside", () => {
+    assert.equal(frameContains(frame, 9, 40), false);
+    assert.equal(frameContains(frame, 50, 71), false);
   });
 });
 
