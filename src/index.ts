@@ -1725,8 +1725,12 @@ async function toggleElement(
         text:
           now === before
             ? `Activated ${name} through accessibility, but it is still ${state(now)}. ` +
-              `The control may be disabled, or it may not respond to activation — ` +
-              `use ui_view and tap the switch itself with ui_tap {x, y}.`
+              `Most often it is scrolled out of view — activation does not take on an ` +
+              `element that is not on screen, which is measurable and is what this ` +
+              `read-back is for. Scroll it into view and try again. Otherwise the ` +
+              `control may be disabled, or may not respond to activation, in which ` +
+              `case read the switch's position from ui_view and tap it with ` +
+              `ui_tap {x, y}.`
             : `Toggled ${name} ${state(before)} -> ${state(now)}.`,
       },
     ],
@@ -1861,6 +1865,14 @@ if (!isToolFiltered("ui_tap")) {
           );
         }
 
+        // What the caller asked for, kept for anything said back to them. The
+        // transform below rewrites x and y into the portrait space the
+        // companion wants, and reporting *those* would answer a landscape tap
+        // at (162.5, 352) with "tapped at (50, 163)" — a coordinate in a space
+        // the caller never uses and cannot check against the tree.
+        const spokenX = Math.round(x);
+        const spokenY = Math.round(y);
+
         // Transform logical coords to portrait space for the companion
         const dims = await getScreenDimensions(sim);
         if (dims) {
@@ -1920,7 +1932,7 @@ if (!isToolFiltered("ui_tap")) {
               : `nothing is there`;
             throw new Error(
               `"${name}" is at ${describeFrame(resolved)}, but ${obstruction}, ` +
-                `so a tap at its centre (${tapX}, ${tapY}) would not reach it — it is ` +
+                `so a tap at its centre (${spokenX}, ${spokenY}) would not reach it — it is ` +
                 `covered, off screen, or scrolled out of view. Scroll it into view, or ` +
                 `read its real position from ui_view and use ui_tap {x, y}.`
             );
@@ -1960,8 +1972,8 @@ if (!isToolFiltered("ui_tap")) {
               type: "text",
               text:
                 count > 1
-                  ? `Tapped${what} ${count} times at (${tapX}, ${tapY}).`
-                  : `Tapped${what} at (${tapX}, ${tapY}).`,
+                  ? `Tapped${what} ${count} times at (${spokenX}, ${spokenY}).`
+                  : `Tapped${what} at (${spokenX}, ${spokenY}).`,
             },
           ],
         };
