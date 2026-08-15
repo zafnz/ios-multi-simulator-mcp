@@ -15,6 +15,7 @@
 //
 
 #import <UIKit/UIKit.h>
+#import <UserNotifications/UserNotifications.h>
 
 #pragma mark - Orientation names
 
@@ -136,8 +137,36 @@ static NSString *DeviceOrientationName(UIDeviceOrientation o) {
              name:UIDeviceOrientationDidChangeNotification
            object:nil];
 
+  // --- Modals: the two kinds, because they are not the same kind ------------
+  //
+  // TODO.md #53: label lookups were seen flipping between hit and miss on
+  // consecutive identical calls while a modal was up, and the suspicion is the
+  // frontmost application changing under the read. Only one of these two
+  // changes the frontmost *process*, which is what makes the pair worth having:
+  //
+  //   In-app  — UIAlertController, presented by this app, in this process.
+  //   System  — the notification permission alert, drawn by a separate process
+  //             that becomes frontmost while it is up (TODO.md #37).
+  //
+  // Both are raised on demand, so a reproduction no longer depends on catching
+  // Photos mid-wizard with a permission prompt racing it.
+  UIButton *inAppModal = [UIButton buttonWithType:UIButtonTypeSystem];
+  [inAppModal setTitle:@"Show In-App Modal" forState:UIControlStateNormal];
+  [inAppModal addTarget:self
+                 action:@selector(showInAppModal)
+       forControlEvents:UIControlEventTouchUpInside];
+  inAppModal.accessibilityIdentifier = @"InAppModalButton";
+
+  UIButton *systemModal = [UIButton buttonWithType:UIButtonTypeSystem];
+  [systemModal setTitle:@"Ask Permission" forState:UIControlStateNormal];
+  [systemModal addTarget:self
+                  action:@selector(askNotificationPermission)
+        forControlEvents:UIControlEventTouchUpInside];
+  systemModal.accessibilityIdentifier = @"SystemModalButton";
+
   UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[
-    self.plainField, plainButton, self.status, self.orientation
+    self.plainField, plainButton, self.status, self.orientation, inAppModal,
+    systemModal
   ]];
   stack.axis = UILayoutConstraintAxisVertical;
   stack.spacing = 24;
@@ -215,6 +244,36 @@ static NSString *DeviceOrientationName(UIDeviceOrientation o) {
 }
 - (void)plainButtonTapped {
   [self report:@"tapped Plain Button"];
+}
+
+/// An alert in this app's own process. The frontmost application does not change.
+- (void)showInAppModal {
+  UIAlertController *alert = [UIAlertController
+      alertControllerWithTitle:@"In-App Modal"
+                       message:@"Presented by the app itself."
+                preferredStyle:UIAlertControllerStyleAlert];
+  [alert addAction:[UIAlertAction actionWithTitle:@"Modal OK"
+                                            style:UIAlertActionStyleDefault
+                                          handler:^(UIAlertAction *a) {
+                                            [self report:@"dismissed In-App Modal"];
+                                          }]];
+  [self presentViewController:alert animated:YES completion:nil];
+  [self report:@"showing In-App Modal"];
+}
+
+/// The system permission alert, drawn by another process which becomes
+/// frontmost while it is up. Only ever appears once per install.
+- (void)askNotificationPermission {
+  [self report:@"asking for notification permission"];
+  [UNUserNotificationCenter.currentNotificationCenter
+      requestAuthorizationWithOptions:UNAuthorizationOptionAlert
+                    completionHandler:^(BOOL granted, NSError *error) {
+                      dispatch_async(dispatch_get_main_queue(), ^{
+                        [self report:[NSString
+                                         stringWithFormat:@"permission granted=%@",
+                                                          granted ? @"YES" : @"NO"]];
+                      });
+                    }];
 }
 
 - (void)fieldChanged:(UITextField *)field {

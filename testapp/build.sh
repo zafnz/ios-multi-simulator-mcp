@@ -25,7 +25,7 @@ xcrun clang \
 	-fobjc-arc \
 	-isysroot "$SDK" \
 	-target "${ARCH}-apple-ios15.0-simulator" \
-	-framework UIKit -framework Foundation \
+	-framework UIKit -framework Foundation -framework UserNotifications \
 	-Wall \
 	-o "$APP/MCPTestApp" \
 	main.m

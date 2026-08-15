@@ -100,7 +100,7 @@ launch_app(id: "test-session", bundle_id: "com.example.mcptestapp")
 ui_view(id: "test-session")
 ```
 
-**Expected:** A screenshot showing a nav bar with **Nav Button**, a text field, **Plain Button**, a status label reading `status: ready`, an orientation label reading `orientation: interface=portrait device=portrait`, and a bottom toolbar with **Toolbar Button** and a search field.
+**Expected:** A screenshot showing a nav bar with **Nav Button**, a text field, **Plain Button**, a status label reading `status: ready`, an orientation label reading `orientation: interface=portrait device=portrait`, **Show In-App Modal** and **Ask Permission**, and a bottom toolbar with **Toolbar Button** and a search field.
 
 ### #10 ui_describe_all — the whole tree, including system chrome
 
@@ -108,10 +108,10 @@ ui_view(id: "test-session")
 ui_describe_all(id: "test-session")
 ```
 
-**Expected:** All five controls are present, and — the point of this step — the `NavigationBar` and `Toolbar` groups **have children**:
+**Expected:** Every control is present, and — the point of this step — the `NavigationBar` and `Toolbar` groups **have children**:
 
 - `NavButton`, inside the nav bar
-- `PlainField`, `PlainButton`, `StatusLabel`, `OrientationLabel` in the plain hierarchy
+- `PlainField`, `PlainButton`, `StatusLabel`, `OrientationLabel`, `InAppModalButton`, `SystemModalButton` in the plain hierarchy
 - `ToolbarButton` and a text field, inside the toolbar
 
 A nav bar or toolbar coming back with no children means the tree has regressed to the incomplete read, and everything below will fail.

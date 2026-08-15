@@ -313,7 +313,25 @@ never declared as a dependency — in the repository it resolved through
   - **`upside_down` is unreachable on a Face ID iPhone.** `Device > Orientation > Portrait Upside Down` does move the device — the app reports `device=portraitUpsideDown` — but iOS never gives the app an upside-down interface, even after `UIInterfaceOrientationPortraitUpsideDown` was added to the fixture's `Info.plist` specifically to test this. The interface stays wherever it was (`landscapeRight` above; `portrait` after a relaunch). So a `rotate(upside_down)` on an iPhone would look broken while behaving correctly, and `detect_rotation` would keep reporting the interface. iPad is where that fourth case can actually be exercised — untested.
   - **Both landscape trees are byte-identical in geometry** (root `874x402`, same frames) — the only thing distinguishing them is the probe. Worth remembering before anyone tries to infer orientation from the frame.
   - `transformPointToPortrait` keys off these names, so this was worth settling before the tool existed rather than after.
-- [ ] **#53 Label lookups are nondeterministic while a system modal is up.** In the 2.0.2 verification, `ui_find "Continue"` and `ui_tap "Continue"` disagreed six times running, back to back, on the same screen — one finding the element, the other reporting it absent. Both call `findByLabel`, so this is not a code divergence: the likeliest cause is AXBridge's frontmost resolution flipping between the alert's process and the app beneath it, so consecutive reads genuinely see different trees. Related to #37 and #46. Matters because dismissing permission dialogs is one of the most common things an agent does.
+- [ ] **#53 Label lookups while a modal is up — investigated 2026-08-15, does not reproduce.** The tools are consistent; what was seen was almost certainly the screen changing between two reads, not a read flipping on one screen.
+  - **Made reproducible first.** `testapp` gained the two kinds of modal, because they are not the same thing and only one of them changes the frontmost process: `Show In-App Modal` (a `UIAlertController`, this app's own process) and `Ask Permission` (the notification alert, drawn by another process). The original sighting was Photos' What's New sheet with a permission prompt racing it, which is exactly the setup that could not be held still.
+  - **Every measurement is deterministic**, on current code:
+
+    | state | probe | result |
+    |---|---|---|
+    | no modal | `ui_find` ×40 | 40 hit |
+    | in-app modal, settled | `ui_find` ×60, incl. controls *underneath* | 60 hit |
+    | system alert, settled | `ui_find` ×20 on the alert's text | 20 hit |
+    | system alert, settled | `ui_find` ×40 on the app beneath | 40 miss |
+    | in-app modal | `ui_find`/`ui_tap` alternating ×15 | 30/30 agree |
+    | system alert | `ui_find`/`ui_tap` alternating ×12, three labels | 72/72 agree |
+    | system alert | `ui_describe_all` ×10 | same tree owner every time |
+
+  - **Two real behaviours can look like the reported one**, and neither is a lookup flipping:
+    - **A system alert replaces the app in the tree** (#37). Reads taken either side of one appearing or being dismissed see genuinely different screens. With Photos' sheet *and* a permission prompt in play, consecutive calls could straddle that boundary repeatedly.
+    - **A tap issued during a presentation animation may not land**, and the next read then correctly reports the state that did not change. Measured: dismiss taps fired immediately after presenting failed in 2 of 3 rounds; with a 1s settle, 4 of 4 rounds dismissed cleanly and the label vanished immediately. The tree was right every time — the tap was the unreliable part.
+  - **Not chased:** whether 2.0.2's code could genuinely flip. Reproducing a ghost from a version we no longer ship, in a scenario (Photos mid-wizard, prompt racing) that could not be held still then either, is worth less than the fixture that now makes both modal kinds reproducible on demand.
+  - Worth doing regardless: say in the tool descriptions that a read straight after a tap that presents or dismisses something can catch the transition, and to settle before reading.
 
 ## Verified working
 
