@@ -1,6 +1,6 @@
 # Testing the tools
 
-Exercises every MCP tool against one simulator. Part 1 covers portrait, Part 2 verifies coordinates after rotation, Part 3 covers views hosted by another process, Part 4 covers controls whose frame is not the thing you can touch, Part 5 times the server.
+Exercises every MCP tool against one simulator. Part 1 covers portrait, Part 2 verifies coordinates after rotation, Part 3 covers views hosted by another process, Part 4 covers controls whose frame is not the thing you can touch, Part 5 checks what we assume idb_companion does, Part 6 times the server.
 
 **Run this through the `mcp__ios-multi-simulator__*` tools, one call at a time.
 Do not script it without explicit permission.**
@@ -132,7 +132,7 @@ ui_find(id: "test-session", label: "Plain Button")
 ui_find(id: "test-session", label: "Toolbar Button")
 ```
 
-**Expected:** The same shape of answer. This one is resolved by the fallback, so it takes noticeably longer than #11 — see Part 3.
+**Expected:** The same shape of answer. This one is resolved by the fallback, so it takes noticeably longer than #11 — see Part 6.
 
 ### #13 ui_tap — tap a toolbar control by name
 
@@ -550,7 +550,46 @@ destroy_simulator(id: "toggle-test")
 
 ---
 
-## Part 5 — Round-trip timing
+## Part 5 — What we assume idb_companion does
+
+Everything above tests this server. This part tests the **binary underneath it**, and belongs to a different question: idb is under active development, none of these behaviours is something upstream has promised to keep, and every one of them is load-bearing for a decision in `src/`. They are also all invisible while they hold — a companion that changed its mind would leave this server quietly doing the wrong thing rather than failing.
+
+```bash
+npm run build && testapp/build.sh
+# install and launch the fixture, main screen
+npm run check:companion -- <udid>
+```
+
+Six assumptions, each named with what depends on it:
+
+| assumption | what breaks if it changes |
+|---|---|
+| a marker matches a **substring** | every partial name an agent uses stops resolving |
+| a marker returns the **first** match, server-side | ambiguity becomes detectable on the fast path, and `matchInTree`'s ranking and `ui_tap`'s naming could be revisited |
+| a marker returns **one element**, not a list | `findByLabel` mis-parses the response rather than rejecting it |
+| the default backend **cannot** see toolbar contents, AXBridge **can** | the ~300ms fallback is either dead weight or newly essential |
+| a point read **hit-tests**, under 100 ms | `ui_tap`'s verification stops being affordable |
+| `accessibility_action` **activates** without a touch | tapping a toggle by name has no mechanism at all |
+
+Then, with a remote-hosted view on screen — tap **Show Picker**, or raise the autofill sheet from Part 3:
+
+```bash
+npm run check:companion -- <udid> --remote
+```
+
+which checks the seventh: that a hosted view still restarts its coordinate space at a node of type `"83"`. If that changes, `translateRemoteSubtrees` silently stops translating and taps inside sheets land hundreds of points away again.
+
+**Run this after bumping `companion.lock.json` or the submodule**, before trusting the new binary. As a demonstration that it bites, run it against the 2022 brew companion, which fails five of the six:
+
+```bash
+IOS_SIMULATOR_MCP_COMPANION_PATH=/opt/homebrew/bin/idb_companion npm run check:companion -- <udid>
+```
+
+— reporting, among other things, that `accessibility_action` is `UNIMPLEMENTED` there.
+
+---
+
+## Part 6 — Round-trip timing
 
 Measures how long the **server** takes, with no model in the loop. Driving the tools through an agent measures the agent; this measures the tool.
 

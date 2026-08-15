@@ -80,6 +80,17 @@ exact Xcode in `.xcode-version`). It sets `XCODEGEN_STRIP_XATTRS=false`, which
 is required — the default path mangles source paths at this directory depth and
 fails with a "Build input file cannot be found" naming a truncated path.
 
+**After changing which companion is used — a submodule bump, a new
+`companion.lock.json`, a local build — run `npm run check:companion -- <udid>`.**
+It checks the behaviours this server assumes of that binary and none of which
+upstream has promised to keep: that a marker match is a substring, that it
+resolves to the first hit and returns a single element, that the default backend
+cannot see toolbar contents while AXBridge can, that a point read hit-tests
+cheaply, and that `accessibility_action` activates a control without a touch.
+Each one is invisible while it holds and silently wrong when it stops. The 2022
+brew companion fails five of the six, which is what the check is calibrated
+against; see TESTING_TOOLS.md Part 5.
+
 The server:
 - Uses the MCP SDK to expose tools for iOS simulator interaction
 - Uses `xcrun simctl` for simulator lifecycle, and gRPC to `idb_companion` for

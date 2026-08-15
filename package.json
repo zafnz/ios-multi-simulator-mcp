@@ -20,6 +20,7 @@
     "gen:keymap": "node scripts/gen-keymap.mjs",
     "build:companion": "cd vendor/idb && XCODEGEN_STRIP_XATTRS=false ./build.sh build",
     "verify:download": "node scripts/verify-companion-download.mjs",
+    "check:companion": "node scripts/check-companion-contract.mjs",
     "gen": "npm run gen:proto && npm run gen:keymap",
     "start": "node build/index.js",
     "watch": "tsc --watch",
