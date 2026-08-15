@@ -26,6 +26,7 @@ import {
   POINT_KEYS,
   pruneTree,
   reconcileType,
+  sameElement,
   translateRemoteSubtrees,
   uniquelyLabelled,
 } from "./ax/tree";
@@ -169,6 +170,39 @@ async function describeScreen(udid: string): Promise<AXElement[]> {
 }
 
 /**
+ * Resolves an element by its accessibility identifier — exact, where a label is
+ * a substring that can drift onto something else as a screen changes.
+ *
+ * No AXBridge fallback: this exists to re-read an element the caller has already
+ * found, so a miss means it has genuinely gone rather than that a backend cannot
+ * see it, and paying ~300ms to confirm a disappearance helps nobody.
+ */
+async function findByIdentifier(
+  udid: string,
+  identifier: string
+): Promise<AXElement | null> {
+  return withAccessibilityRecovery(udid, () =>
+    companions.withClient(udid, async (client) => {
+      try {
+        const found = (await client.accessibilityInfo({
+          marker: identifier,
+          matchKey: SearchableKey.UNIQUE_ID,
+          keys: DESCRIBE_KEYS,
+        })) as { elements?: AXElement } | null;
+        markAccessibilityAnswered(udid);
+        return found?.elements ? canonicalise(found.elements) : null;
+      } catch (error) {
+        if (/found no element/i.test((error as Error).message)) {
+          markAccessibilityAnswered(udid);
+          return null;
+        }
+        throw error;
+      }
+    })
+  );
+}
+
+/**
  * Resolves a single element by the text a caller knows it by.
  *
  * Cheap path first: the companion matches a marker server-side and returns just
@@ -230,6 +264,15 @@ async function findByLabel(
     })
   );
   if (marker) return marker;
+
+  // An accessibility identifier is the other name an element has, and the tree
+  // publishes it — so an agent reading `AXUniqueId: "PlainStepper-Increment"`
+  // off a describe and handing it straight back is doing the obvious thing.
+  // Before this it got "No element found" for a name it had just been given.
+  // Second, not first: a label is what a caller usually means, and this costs
+  // another ~15ms only once that has missed.
+  const byId = await findByIdentifier(udid, label);
+  if (byId) return byId;
 
   let tree: AXElement[];
   try {
@@ -1568,37 +1611,12 @@ if (!isToolFiltered("ui_find")) {
   );
 }
 
-/**
- * Resolves an element by its accessibility identifier — exact, where a label is
- * a substring that can drift onto something else as a screen changes.
- *
- * No AXBridge fallback: this exists to re-read an element the caller has already
- * found, so a miss means it has genuinely gone rather than that a backend cannot
- * see it, and paying ~300ms to confirm a disappearance helps nobody.
- */
-async function findByIdentifier(
-  udid: string,
-  identifier: string
-): Promise<AXElement | null> {
-  return withAccessibilityRecovery(udid, () =>
-    companions.withClient(udid, async (client) => {
-      try {
-        const found = (await client.accessibilityInfo({
-          marker: identifier,
-          matchKey: SearchableKey.UNIQUE_ID,
-          keys: DESCRIBE_KEYS,
-        })) as { elements?: AXElement } | null;
-        markAccessibilityAnswered(udid);
-        return found?.elements ? canonicalise(found.elements) : null;
-      } catch (error) {
-        if (/found no element/i.test((error as Error).message)) {
-          markAccessibilityAnswered(udid);
-          return null;
-        }
-        throw error;
-      }
-    })
-  );
+/** An element's rectangle, for an error message a caller has to act on. */
+function describeFrame(element: AXElement): string {
+  const frame = element.frame;
+  if (!frame) return "no usable position";
+  const round = (n: number) => Math.round(n);
+  return `{x:${round(frame.x)} y:${round(frame.y)} w:${round(frame.width)} h:${round(frame.height)}}`;
 }
 
 /**
@@ -1756,20 +1774,50 @@ if (!isToolFiltered("ui_tap")) {
       handleToolError("Error tapping on the screen", async () => {
         const sim = getManagedSim(id);
 
+        // Kept for the verification below, which only applies to a tap aimed by
+        // name: coordinates are the caller saying where, and are taken at their
+        // word.
+        let resolved: AXElement | null = null;
+
         // A label resolves to the centre of that element, in the same logical
         // space as explicit coordinates, so both paths share the transform below.
         if (label !== undefined) {
           const element = await findByLabel(sim.udid, label);
+          resolved = element;
           if (!element) {
             throw new Error(
               `No element found whose label contains "${label}". Use ui_describe_all to see what is on screen.`
             );
           }
 
-          // A toggle is operated, not touched — unless the caller asked for a
-          // hold, which is a gesture and can only be a real one.
-          if (isToggle(element) && duration === undefined && count === 1) {
-            return await toggleElement(sim.udid, element, label);
+          const name = typeof element.AXLabel === "string" ? element.AXLabel : label;
+
+          // Free, and it forecloses a whole category of confusion: a disabled
+          // control receives the touch and ignores it, so every symptom of
+          // "the tap did nothing" looks the same as a mis-aimed one.
+          if (element.enabled === false) {
+            throw new Error(
+              `"${name}" is disabled, so tapping it would do nothing. ` +
+                `It is at ${describeFrame(element)}.`
+            );
+          }
+
+          if (isToggle(element)) {
+            // A toggle is operated, not touched.
+            if (duration === undefined && count === 1) {
+              return await toggleElement(sim.udid, element, label);
+            }
+            // A hold or a double-tap can only be a real touch, and a real touch
+            // aimed at a toggle's centre lands nowhere — the frame spans the
+            // row and the control is off to one side. Rather than deliver a
+            // gesture that cannot work and report success, say so: this was
+            // measured doing exactly that, silently, before the check existed.
+            throw new Error(
+              `"${name}" is a toggle, and ${duration !== undefined ? "a hold" : "a multi-tap"} ` +
+                `cannot be delivered to one by name: its frame spans the whole row, so the ` +
+                `centre is not the control. Call ui_tap {label} with no ${duration !== undefined ? "duration" : "count"} ` +
+                `to switch it, or read the control's position from ui_view and use ui_tap {x, y}.`
+            );
           }
 
           const centre = centreOf(element);
@@ -1815,6 +1863,45 @@ if (!isToolFiltered("ui_tap")) {
           MIN_TAP_HOLD_SECONDS
         );
 
+        // Check the touch will reach the element it was aimed at, before
+        // sending it.
+        //
+        // A frame can be perfectly correct and still not be tappable at its
+        // centre: an element scrolled under a toolbar, covered by a keyboard, or
+        // sitting below the fold keeps its place in the tree while its centre
+        // belongs to whatever is drawn on top. Measured on the fixture, whose
+        // stepper sits under the toolbar — `ui_tap {label: "Plain Stepper,
+        // Increment"}` focused the toolbar's search field, opened the keyboard,
+        // and answered "Tapped successfully".
+        //
+        // A hit-test is ~10ms against a tap that already costs ~110ms, and it is
+        // the only general defence against that: the frames are right, so no
+        // amount of tree work would notice. Refuses rather than taps, because
+        // the wrong action is worse than none and the caller can still aim by
+        // coordinate.
+        if (resolved) {
+          let atPoint: AXElement | null = null;
+          try {
+            atPoint = await describePoint(sim.udid, tapX, tapY);
+          } catch {
+            // An empty point read means nothing is there to receive the touch,
+            // which is itself the answer; `atPoint` stays null.
+          }
+          if (!atPoint || !sameElement(resolved, atPoint)) {
+            const name =
+              typeof resolved.AXLabel === "string" ? resolved.AXLabel : label;
+            const obstruction = atPoint
+              ? `"${atPoint.AXLabel ?? atPoint.AXValue ?? atPoint.type ?? "something else"}" is there instead`
+              : `nothing is there`;
+            throw new Error(
+              `"${name}" is at ${describeFrame(resolved)}, but ${obstruction}, ` +
+                `so a tap at its centre (${tapX}, ${tapY}) would not reach it — it is ` +
+                `covered, off screen, or scrolled out of view. Scroll it into view, or ` +
+                `read its real position from ui_view and use ui_tap {x, y}.`
+            );
+          }
+        }
+
         // Exclusive: interleaving another session's input with a multi-tap
         // would turn a double-tap into two unrelated single taps.
         await companions.withClient(
@@ -1828,9 +1915,30 @@ if (!isToolFiltered("ui_tap")) {
           { exclusive: true }
         );
 
+        // Names what was tapped, not merely that something was.
+        //
+        // Matching is substring and the companion returns the first hit, so the
+        // element found is not always the one meant — a status line reading
+        // "Settings Switch = on" outranked the switch it was describing, and a
+        // permission alert's sentence has outranked an app icon. Nothing on the
+        // fast path can tell that others matched, so the next best thing is to
+        // say which one was acted on, where a caller can see it immediately
+        // rather than work it out from the aftermath.
+        const what = resolved
+          ? ` "${resolved.AXLabel ?? resolved.AXValue ?? label}"` +
+            (resolved.type ? ` (${resolved.type})` : "")
+          : "";
         return {
           isError: false,
-          content: [{ type: "text", text: count > 1 ? `Tapped ${count} times successfully` : "Tapped successfully" }],
+          content: [
+            {
+              type: "text",
+              text:
+                count > 1
+                  ? `Tapped${what} ${count} times at (${tapX}, ${tapY}).`
+                  : `Tapped${what} at (${tapX}, ${tapY}).`,
+            },
+          ],
         };
       })
   );

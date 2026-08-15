@@ -503,6 +503,7 @@ export function matchInTree(
   const needle = normaliseForMatch(label);
   const labelHits: AXElement[] = [];
   const valueHits: AXElement[] = [];
+  const idHits: AXElement[] = [];
 
   const visit = (element: AXElement) => {
     const [elementLabel, elementValue] = [
@@ -513,13 +514,91 @@ export function matchInTree(
     if (elementLabel && elementLabel.includes(needle)) labelHits.push(element);
     else if (elementValue && elementValue.includes(needle))
       valueHits.push(element);
+    // Last, because an identifier is a developer's name for a thing rather than
+    // anything a user sees — but the tree publishes it, so a caller can quite
+    // reasonably hand one back, and the marker query that would have caught it
+    // cannot see the elements only this backend reaches.
+    else if (element.AXUniqueId === label) idHits.push(element);
 
     for (const child of element.children ?? []) visit(child);
   };
   elements.forEach(visit);
 
-  const hit = labelHits[0] ?? valueHits[0];
+  const hit =
+    best(labelHits, needle) ?? best(valueHits, needle) ?? idHits[0];
   return hit ? canonicalise(hit) : null;
+}
+
+/**
+ * Picks the likeliest of several elements matching the same text.
+ *
+ * Matching is substring, so a screen routinely offers more than one answer and
+ * document order decides which — badly. Every instance of this so far has been
+ * the same shape: a *description* of a control outranking the control. A status
+ * line reading "Settings Switch = on" beat the switch it was describing; a
+ * permission alert's sentence beat the Photos icon; a wizard's body text beat
+ * the Collections tab. In each case the wanted element was named exactly and
+ * the impostor merely contained the words.
+ *
+ * So: an exact name beats a partial one, and a control beats prose. Order
+ * breaks the remaining ties, which keeps this predictable when nothing
+ * distinguishes the candidates.
+ *
+ * Only reachable on the tree path. The companion resolves a marker query with
+ * `elements.first`, server-side, and returns one element with no sign that
+ * others matched — so on the fast path there is nothing here to choose between.
+ */
+function best(candidates: AXElement[], needle: string): AXElement | undefined {
+  if (candidates.length < 2) return candidates[0];
+
+  const score = (element: AXElement): number => {
+    const text = [element.AXLabel, element.AXValue]
+      .map((v) => (typeof v === "string" ? normaliseForMatch(v) : ""))
+      .find((t) => t.includes(needle));
+    let points = 0;
+    if (text === needle) points += 2;
+    if (ACTIONABLE_TYPES.has(String(element.type))) points += 1;
+    return points;
+  };
+
+  return candidates.reduce((chosen, candidate) =>
+    score(candidate) > score(chosen) ? candidate : chosen
+  );
+}
+
+/**
+ * Whether a hit-test landed on the element that was resolved by name.
+ *
+ * Deliberately lenient, because the two reads describe the same screen from
+ * different angles and disagree in harmless ways: a point read returns the
+ * deepest element under the point, which for a button resolved by its label may
+ * be that button's own text. Identity first, then containment either way, which
+ * covers the ancestor-and-descendant case without needing the tree to prove it.
+ *
+ * The case it must catch is the one it was written for: an element whose frame
+ * is real but sits under a toolbar or below the fold, where the centre belongs
+ * to something else entirely and the tap silently operates that instead.
+ */
+export function sameElement(a: AXElement, b: AXElement): boolean {
+  const idA = a.AXUniqueId;
+  const idB = b.AXUniqueId;
+  if (typeof idA === "string" && idA && typeof idB === "string" && idB) {
+    if (idA === idB) return true;
+  }
+
+  const labelA = typeof a.AXLabel === "string" ? normaliseForMatch(a.AXLabel) : "";
+  const labelB = typeof b.AXLabel === "string" ? normaliseForMatch(b.AXLabel) : "";
+  if (labelA && labelB && labelA === labelB) return true;
+
+  const fa = a.frame;
+  const fb = b.frame;
+  if (!fa || !fb) return false;
+  const encloses = (outer: Frame, inner: Frame) =>
+    inner.x >= outer.x - 1 &&
+    inner.y >= outer.y - 1 &&
+    inner.x + inner.width <= outer.x + outer.width + 1 &&
+    inner.y + inner.height <= outer.y + outer.height + 1;
+  return encloses(fa, fb) || encloses(fb, fa);
 }
 
 /** The centre of an element's frame, in the tree's logical coordinate space. */

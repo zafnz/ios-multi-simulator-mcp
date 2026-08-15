@@ -141,7 +141,7 @@ ui_tap(id: "test-session", label: "Toolbar Button")
 ui_find(id: "test-session", label: "status:")
 ```
 
-**Expected:** "Tapped successfully", then a status label reading `status: tapped Toolbar Button`. The status label lives in the plain hierarchy, so this confirms the toolbar tap without reading the toolbar.
+**Expected:** `Tapped "Toolbar Button" (Button) at (102, 822).`, then a status label reading `status: tapped Toolbar Button`. The reply names the element it acted on, so a lookup that resolved the wrong thing is visible here rather than in the aftermath. The status label lives in the plain hierarchy, so this confirms the toolbar tap without reading the toolbar.
 
 ### #14 ui_tap — a control that has no label
 
@@ -151,7 +151,7 @@ The toolbar's text field carries its visible text in `AXValue` and has no `AXLab
 ui_tap(id: "test-session", label: "Toolbar Search")
 ```
 
-**Expected:** "Tapped successfully", and the field is focused. This is matching on value rather than label.
+**Expected:** `Tapped "Toolbar Search" (TextField) at (298, 822).`, and the field is focused. This is matching on value rather than label — and the reply naming a `TextField` is what confirms it matched the field and not some text saying the same thing.
 
 ### #15 ui_type — type into the focused field
 
@@ -349,7 +349,7 @@ destroy_simulator(id: "landscape-test")
 
 iOS draws some UI from a **separate process** hosted inside the app's window: the "Use Strong Password?" autofill sheet, photo and document pickers, share sheets. Their elements arrive in the same tree as the app's own, with nothing naming them as different, and their frames are measured from the hosting window rather than the screen.
 
-This is the regression test for that. It is worth running carefully, because the failure mode is the worst kind this server has: `ui_tap {label}` resolves the name, taps a plausible-looking coordinate, and answers **`Tapped successfully`** while the touch lands somewhere else entirely. Nothing in the reply says otherwise, and the tree that would contradict it is the same tree that is wrong. Before the fix, tapping `Fill Strong Password` pressed **Login Submit**.
+This is the regression test for that. It is worth running carefully, because the failure mode is the worst kind this server has: `ui_tap {label}` resolves the name, taps a plausible-looking coordinate, and reports a cheerful success while the touch lands somewhere else entirely. Nothing in the reply said otherwise, and the tree that would contradict it is the same tree that is wrong. Before the fix, tapping `Fill Strong Password` pressed **Login Submit**.
 
 Both halves matter and they check opposite things. The sheet's window sits partway down the screen, so its contents need translating; the picker's window sits at the screen origin, so its contents are **already correct** and must be left alone. A fix that shifts everything hosted passes the first half and fails the second.
 
@@ -406,7 +406,7 @@ ui_view(id: "remote-test")
 
 **Expected:** The sheet dismisses and the password field is **filled with a generated password** (a long row of dots).
 
-This is the step that matters most, because it is the one an agent actually takes. `Tapped successfully` is **not** a pass on its own — it was returned by the broken version too. Only the screenshot decides. If the login screen is unchanged, or the app has navigated because "Login Submit" was pressed instead, the fix has regressed.
+This is the step that matters most, because it is the one an agent actually takes. A success line is **not** a pass on its own — the broken version returned one too. Only the screenshot decides. If the login screen is unchanged, or the app has navigated because "Login Submit" was pressed instead, the fix has regressed.
 
 ### #40 The control case — a picker must be left alone
 
@@ -465,7 +465,7 @@ ui_tap(id: "toggle-test", label: "Settings Switch")
 
 Three distinct failures hide behind this one line:
 
-- **`Tapped successfully`** means the element was not recognised as a toggle, so it was touched at its centre instead of activated. The state will not have changed. This is the original bug.
+- **`Tapped "Settings Switch" (Switch) at ...`** means the element was not recognised as a toggle, so it was touched at its centre instead of activated. The state will not have changed. This is the original bug.
 - **`Activated Settings Switch through accessibility, but it is still off`** means activation reached the element and the element did nothing with it. That is an app-side gap rather than a tool one — a merged row that never implements activation cannot be worked by VoiceOver either — but check the fixture has not regressed into publishing a cell instead of the switch.
 - **`could not read its state back`** means the toggle flipped but the confirming lookup failed. Most likely something else on screen now matches the name.
 
@@ -481,7 +481,7 @@ ui_tap(id: "toggle-test", x: <switch_x>, y: <switch_y>)
 ui_find(id: "toggle-test", label: "status:")
 ```
 
-**Expected:** `Tapped successfully`, and the status line changes — `status: settings toggle = ...`, flipped from wherever #44 left it.
+**Expected:** a `Tapped ... at (x, y)` line, and the status line changes — `status: settings toggle = ...`, flipped from wherever #44 left it.
 
 This is the half that depends on a tap being **held**. An instantaneous touch actuates a switch about 40% of the time, so a coordinate tap that works once proves little; if this step is flaky, that floor has regressed rather than anything about toggles. See `MIN_TAP_HOLD_SECONDS`.
 
@@ -492,9 +492,35 @@ ui_tap(id: "toggle-test", label: "Split Switch")
 ui_find(id: "toggle-test", label: "status:")
 ```
 
-**Expected:** `Tapped successfully`, and **the status line does not change**.
+**Expected:** `Tapped "Split Switch" (StaticText) at ...`, and **the status line does not change**.
+
+The `(StaticText)` in that reply is the useful part: it says plainly that the name resolved to a piece of text rather than a control, which is the whole reason nothing happened.
 
 That is correct, not a bug, and it is here so nobody later "fixes" it. `Split Switch` is a label and a switch in a plain container with nothing merging them, so iOS publishes two elements: a static text carrying the name, and an unnamed switch beside it. The name genuinely refers to the text. A VoiceOver user meets the same wall and moves on to the switch. The rule the tools follow is that they operate what iOS says the element *is* — and no amount of activation makes a label into a control.
+
+### #47 A covered control must refuse, not tap something else
+
+The fixture's stepper sits below the fold, under the toolbar — its frame is perfectly correct, and its centre belongs to the toolbar's search field:
+
+```
+ui_tap(id: "toggle-test", label: "Plain Stepper, Increment")
+```
+
+**Expected:** an **error**, naming what is in the way:
+
+> `"Plain Stepper, Increment" is at {x:201 y:794 w:140 h:32}, but "Toolbar Search" is there instead, so a tap at its centre (271, 810) would not reach it — it is covered, off screen, or scrolled out of view.`
+
+**A `Tapped ...` reply here is the regression.** Before this check existed, that call focused the toolbar's search field, opened the keyboard, and reported success. Every frame involved was correct, so no amount of tree work would have caught it — the guard is a single hit-test at the point about to be touched, ~10 ms against a tap that already costs ~110 ms.
+
+Then confirm it has not become over-eager, which would be worse than the bug it prevents:
+
+```
+ui_tap(id: "toggle-test", label: "Plain Button")
+ui_tap(id: "toggle-test", label: "Toolbar Button")
+ui_tap(id: "toggle-test", label: "Nav Button")
+```
+
+**Expected:** three `Tapped ... at (x, y)` replies. `Toolbar Button` is the one to watch — it lives in system chrome and is resolved by the AXBridge fallback, so it exercises the verification against an element the cheap backend cannot see.
 
 ```
 destroy_simulator(id: "toggle-test")
@@ -565,13 +591,13 @@ All tools tested:
 | Tool | Steps |
 |------|-------|
 | `start_simulator` | #1, #21, #23, #35, #43 |
-| `destroy_simulator` | #21, #22, #34, #42, #45 |
+| `destroy_simulator` | #21, #22, #34, #42, #47 |
 | `attach_simulator` | #21 |
 | `rotate` | #26 |
 | `detect_rotation` | #27 |
 | `ui_describe_all` | #3, #10, #25, #29 |
 | `ui_find` | #11, #12, #13, #15, #30, #32, #33, #37, #40, #45, #46 |
-| `ui_tap` | #13, #14, #19, #30, #32, #33, #35, #39, #41, #44, #45, #46 |
+| `ui_tap` | #13, #14, #19, #30, #32, #33, #35, #39, #41, #44, #45, #46, #47 |
 | `ui_type` | #15, #33 |
 | `ui_swipe` | #5 |
 | `ui_describe_point` | #4, #16, #38 |

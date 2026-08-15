@@ -17,6 +17,7 @@ import {
   normaliseForMatch,
   pruneTree,
   reconcileType,
+  sameElement,
   translateRemoteSubtrees,
   uniquelyLabelled,
 } from "../src/ax/tree.ts";
@@ -474,6 +475,176 @@ test("locateInTree", async (t) => {
   });
 });
 
+// Every case here is transcribed from a real incident, because the ranking
+// exists to settle a specific recurring collision rather than in the abstract.
+test("matchInTree ranking", async (t) => {
+  // The one that started it: the fixture's status line, describing the switch
+  // it had just flipped, outranked the switch itself.
+  await t.test("an exact name beats a sentence containing it", () => {
+    const hit = matchInTree(
+      [
+        {
+          type: "Application",
+          frame: { x: 0, y: 0, width: 402, height: 874 },
+          children: [
+            {
+              type: "StaticText",
+              AXLabel: "status: Settings Switch = on",
+              frame: { x: 61, y: 252, width: 280, height: 20 },
+            },
+            {
+              type: "Switch",
+              AXLabel: "Settings Switch",
+              AXValue: "1",
+              AXUniqueId: "SettingsSwitch",
+              frame: { x: 61, y: 427, width: 280, height: 40 },
+            },
+          ],
+        },
+      ],
+      "Settings Switch"
+    );
+    assert.equal(hit?.AXUniqueId, "SettingsSwitch");
+  });
+
+  // Photos: `ui_find "Photo"` matched the notification alert's prose, which
+  // appears earlier in the tree than the icon.
+  await t.test("a control beats prose when neither is exact", () => {
+    const hit = matchInTree(
+      [
+        {
+          type: "Application",
+          frame: { x: 0, y: 0, width: 402, height: 874 },
+          children: [
+            {
+              type: "StaticText",
+              AXLabel: '"Photos" Would Like to Send You Notifications',
+              frame: { x: 20, y: 100, width: 360, height: 40 },
+            },
+            {
+              type: "Button",
+              AXLabel: "Photos",
+              AXUniqueId: "Photos",
+              frame: { x: 120, y: 288, width: 68, height: 90 },
+            },
+          ],
+        },
+      ],
+      "Photo"
+    );
+    assert.equal(hit?.AXUniqueId, "Photos");
+  });
+
+  // Predictability matters more than cleverness once nothing separates them.
+  await t.test("document order still breaks a genuine tie", () => {
+    const hit = matchInTree(
+      [
+        {
+          type: "Application",
+          frame: { x: 0, y: 0, width: 402, height: 874 },
+          children: [
+            { type: "Button", AXLabel: "Go", AXUniqueId: "first", frame: { x: 0, y: 0, width: 10, height: 10 } },
+            { type: "Button", AXLabel: "Go", AXUniqueId: "second", frame: { x: 0, y: 20, width: 10, height: 10 } },
+          ],
+        },
+      ],
+      "Go"
+    );
+    assert.equal(hit?.AXUniqueId, "first");
+  });
+
+  await t.test("a label still beats a value", () => {
+    const hit = matchInTree(
+      [
+        {
+          type: "Application",
+          frame: { x: 0, y: 0, width: 402, height: 874 },
+          children: [
+            { type: "TextField", AXValue: "Search", frame: { x: 0, y: 0, width: 10, height: 10 } },
+            { type: "StaticText", AXLabel: "Search", frame: { x: 0, y: 20, width: 10, height: 10 } },
+          ],
+        },
+      ],
+      "Search"
+    );
+    assert.equal(hit?.type, "StaticText");
+  });
+
+  // An identifier is a developer's name, so it is the last resort — but the
+  // tree publishes it, and a caller handing one back should not get "not found".
+  await t.test("falls back to an exact identifier", () => {
+    const hit = matchInTree(
+      [
+        {
+          type: "Application",
+          frame: { x: 0, y: 0, width: 402, height: 874 },
+          children: [
+            {
+              type: "Button",
+              AXLabel: "Plain Stepper, Increment",
+              AXUniqueId: "PlainStepper-Increment",
+              frame: { x: 201, y: 793, width: 140, height: 32 },
+            },
+          ],
+        },
+      ],
+      "PlainStepper-Increment"
+    );
+    assert.equal(hit?.AXLabel, "Plain Stepper, Increment");
+  });
+});
+
+test("sameElement", async (t) => {
+  const stepper = {
+    type: "Button",
+    AXLabel: "Plain Stepper, Increment",
+    AXUniqueId: "PlainStepper-Increment",
+    frame: { x: 201, y: 793, width: 140, height: 32 },
+  };
+
+  await t.test("an identifier settles it", () => {
+    assert.equal(
+      sameElement(stepper, { ...stepper, frame: { x: 0, y: 0, width: 1, height: 1 } }),
+      true
+    );
+  });
+
+  await t.test("so does a label, when there is no identifier", () => {
+    assert.equal(
+      sameElement(
+        { type: "Button", AXLabel: "Nav Button", frame: { x: 271, y: 66, width: 111, height: 36 } },
+        { type: "Button", AXLabel: "Nav Button", frame: { x: 271, y: 66, width: 111, height: 36 } }
+      ),
+      true
+    );
+  });
+
+  // The common harmless disagreement: a point read returns the deepest element,
+  // which for a button resolved by name is often that button's own text.
+  await t.test("a descendant counts as the same element", () => {
+    const button = { type: "Button", frame: { x: 61, y: 206, width: 280, height: 30 } };
+    const innerText = { type: "StaticText", frame: { x: 159, y: 212, width: 83, height: 18 } };
+    assert.equal(sameElement(button, innerText), true);
+    assert.equal(sameElement(innerText, button), true);
+  });
+
+  // The case it exists for: the stepper's frame is real, but the toolbar's
+  // search field is what is actually drawn over its centre.
+  await t.test("a different element elsewhere does not", () => {
+    const toolbarField = {
+      type: "TextField",
+      AXValue: "Toolbar Search",
+      AXUniqueId: "ToolbarField",
+      frame: { x: 226, y: 805, width: 142, height: 34 },
+    };
+    assert.equal(sameElement(stepper, toolbarField), false);
+  });
+
+  await t.test("no frames and no names is not a match", () => {
+    assert.equal(sameElement({ type: "Any" }, { type: "Any" }), false);
+  });
+});
+
 test("isToggle", async (t) => {
   // The two names the backends give the same control: the tree says Switch, a
   // point read says CheckBox, and a caller can hand us either.
@@ -701,7 +872,13 @@ test("matchInTree", async (t) => {
     assert.equal(matchInTree(tree, "Settings")?.AXUniqueId, "button");
   });
 
-  await t.test("otherwise the first in document order wins", () => {
+  // This used to assert that the container won, on document order alone. It
+  // now loses to the cell, and that is the intended change: a caller naming
+  // something is going to act on it, an enclosing "Search results" group is not
+  // somewhere to tap, and the container being first is an accident of nesting
+  // rather than a reason. Document order still decides between equals — see the
+  // ranking tests above.
+  await t.test("a control beats the container that encloses it", () => {
     const tree: AXElement[] = [
       {
         AXLabel: "Search results",
@@ -712,7 +889,7 @@ test("matchInTree", async (t) => {
       },
     ];
     assert.equal(matchInTree(tree, "Search 2")?.AXUniqueId, "second");
-    assert.equal(matchInTree(tree, "Search")?.AXLabel, "Search results");
+    assert.equal(matchInTree(tree, "Search")?.AXUniqueId, "first");
   });
 
   await t.test("returns one canonical element, not a subtree", () => {
