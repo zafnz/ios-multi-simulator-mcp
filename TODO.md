@@ -1,3 +1,38 @@
+# TODO — Production bug, reported 2026-08-15
+
+- [ ] **#60 HIGH PRIORITY. Elements inside a remote-view sheet report frames in the sheet's own coordinate space, so `ui_tap {label}` taps the wrong place and says it succeeded.**
+
+  Reported from production: an agent on a login screen, with iOS's **"Use Strong Password?"** autofill sheet up, was given a tree whose frames disagreed with the screen. It diagnosed the cause itself and was right.
+
+  **Symptom.** On a 402x874 screen with the sheet at the bottom, the tree reports the sheet's contents near the top:
+
+  | element | tree `y` centre | actually on screen | delta |
+  |---|---|---|---|
+  | `Close` (✕) | 30.7 | ~507 | ~476 |
+  | `Use Strong Password?` | 160 | ~635 | ~475 |
+  | `Fill Strong Password` | 261 | ~738 | ~477 |
+
+  `x` is already screen space (the ✕ centre reads 365.3 against ~365 on screen), because that sheet's window starts at x=0. A window not spanning the full width would be wrong in both axes. The app's own elements in the same tree are correct — `Create account` at y=415+44/2 = 437 matches the screen — so **one tree mixes two coordinate spaces with nothing marking the boundary**.
+
+  **Consequence, and why it is the priority.** `ui_tap {label: "Fill Strong Password"}` resolves the label to that frame, taps its centre (201, 261), and returns `Tapped successfully`. Verified: `ui_describe_point(201, 261)` returns the login form's `ScrollArea`. The tap lands on the password field. The caller is told it worked, and the tree that would contradict it is the same tree that lied. Tapping by label is the documented, cheapest navigation path, so the failure sits on the route agents are told to take.
+
+  **Measured on the reported simulator** (`whisky-autofill_iphone-16-pro`, `0F37F84D-8B42-4397-A9DD-E5184E814B82`), attached read-only:
+  - `ui_describe_point(201, 738)` — the button's true position — returns the right element, `AXUniqueId: GenerateStrongPasswordButton`, but with the same wrong frame `{x:36, y:239.3, w:330, h:44}`. **So the frame is local-space in both backends**; hit-testing finds the element, it just cannot tell you where it is.
+  - With `pid` and `is_remote` temporarily added to the key set: every element in the AXBridge tree, sheet included, reports `pid: 89215` (the app) and `is_remote: false`. The AX point read at the true position reports **`pid: 89486`** — the remote view service. **The tree carries no signal at all; the point read does.**
+
+  **Upstream does not translate these either**, so this is not us mis-reading a field. `discoverRemoteElements` in [FBAXTranslationRequest.swift:204](vendor/idb/FBSimulatorControl/Commands/FBAXTranslationRequest.swift:204) grid hit-tests for other processes and serializes `hitElement.axFrame()` verbatim, marking the result `isRemote: true`; nothing anywhere adjusts for the hosting window's origin.
+
+  **There is a workaround today**, and it is worth telling users about regardless of the fix: `ui_view` returns logical space in portrait — the same space `ui_tap` takes — so an agent can read the button's position off the screenshot and tap explicit coordinates. Confirmed: (201, 738) read off the screenshot hit-tests to the button. It costs a screenshot per step, asks the model to eyeball a position, and stops being true once the device is rotated.
+
+  **Candidate fixes, cheapest first.** Not yet decided:
+  1. **Verify before tapping.** `ui_tap {label}` already has the frame; hit-test its centre first (~10ms) and if the element there is not the one that was resolved, refuse rather than tap, and say the position is untrustworthy and to use `ui_view` with coordinates. Turns a silent wrong action into a plain answer — the same shape as `rotate` reporting the orientation it read back. Does not fix the frames.
+  2. **Locate the element for real.** Having detected the mismatch, recover the window offset by probing: the size is right and the offset is shared by every element of that window, so scanning for one edge calibrates the rest. Roughly 30 point reads, ~300ms, only on the broken path. Fixes tapping; the tree still reports local frames to anyone reading it.
+  3. **Tap by accessibility instead of by coordinate.** idb exposes an `accessibility_action` RPC whose `Tap` targets a marker, and the accessibility backend implements it as `AXPress` — [FBAccessibilityUIAutomation.swift:92](vendor/idb/FBSimulatorControl/Commands/FBAccessibilityUIAutomation.swift:92), which says outright that it does not synthesize a touch. Immune to the whole problem, but: `AXPress` is not a real touch and some controls respond differently, a hold duration is unsupported, and **it is untested whether a marker query resolves an element in another process at all** — our marker path already misses system chrome, which is why the AXBridge fallback exists. Worth an experiment before it is worth a design.
+
+  **Try upstream first (the user's call, and the cheapest move).** We pin `da0f89a`; upstream has been active. Before building anything, run a current `idb_companion` against this exact screen and see whether remote frames are translated now — this is precisely the kind of thing their remote-content work would touch. If it is fixed there, this becomes a submodule bump. See #49 for how upstream releases are consumed, and note #36b — the searchbar issue we were going to add findings to — is adjacent.
+
+  **Reproducing needs a song and dance:** an app with `username` and `newPassword` field types, and password autofill enabled in Settings. `testapp/` could grow a login screen with the right `textContentType` values, which would make this a fixture case like the modal work in #53 — worth doing if we fix it rather than bumping.
+
 # TODO — Code Review Findings
 
 ## Bugs
