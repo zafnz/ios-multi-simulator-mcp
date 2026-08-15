@@ -37,10 +37,10 @@ Base name is the library, `-mcp` is the integration. Nobody types an MCP config
 by hand, so `npx simgadget-mcp` costs its users nothing, and the plain name is
 worth more attached to the thing people `npm install`.
 
-Both names were free on npm as of 2026-08-15, and `npm search simgadget` finds
-nothing at all. **Reserve both with placeholder publishes before this plan is
-visible anywhere public** — npm's name-dispute process is slow and the names are
-squattable the moment they appear in a repo.
+Both names were free on npm as of 2026-08-15, and `npm search simgadget` found
+nothing at all. **Both reserved with placeholder publishes, 2026-08-16** —
+done first because npm's name-dispute process is slow and the names were
+squattable the moment they appeared in a repo.
 
 ### Why not one package with two entry points
 
@@ -388,8 +388,9 @@ agents, so library and server tell one story.
 Each phase ships on its own. As one commit this would be miserable to review and
 impossible to revert.
 
-0. **Reserve `simgadget` and `simgadget-mcp` on npm.** Minutes of work, and the
-   only step that gets harder the longer the plan is public.
+0. **Reserve `simgadget` and `simgadget-mcp` on npm.** ~~Minutes of work, and
+   the only step that gets harder the longer the plan is public.~~ **Done,
+   2026-08-16.**
 1. **Rename** repo, product, website, docs, env vars with fallback shim. No code
    movement. (This must come first: the lockfile fix depends on the renamed
    repo existing.)
