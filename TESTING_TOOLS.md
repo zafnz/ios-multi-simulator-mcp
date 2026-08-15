@@ -1,6 +1,6 @@
 # Testing the tools
 
-Exercises every MCP tool against one simulator. Part 1 covers portrait, Part 2 verifies coordinates after rotation, Part 3 times the server.
+Exercises every MCP tool against one simulator. Part 1 covers portrait, Part 2 verifies coordinates after rotation, Part 3 covers views hosted by another process, Part 4 times the server.
 
 **Run this through the `mcp__ios-multi-simulator__*` tools, one call at a time.
 Do not script it without explicit permission.**
@@ -343,7 +343,101 @@ destroy_simulator(id: "landscape-test")
 
 ---
 
-## Part 3 — Round-trip timing
+## Part 3 — Remote-hosted views
+
+iOS draws some UI from a **separate process** hosted inside the app's window: the "Use Strong Password?" autofill sheet, photo and document pickers, share sheets. Their elements arrive in the same tree as the app's own, with nothing naming them as different, and their frames are measured from the hosting window rather than the screen.
+
+This is the regression test for that. It is worth running carefully, because the failure mode is the worst kind this server has: `ui_tap {label}` resolves the name, taps a plausible-looking coordinate, and answers **`Tapped successfully`** while the touch lands somewhere else entirely. Nothing in the reply says otherwise, and the tree that would contradict it is the same tree that is wrong. Before the fix, tapping `Fill Strong Password` pressed **Login Submit**.
+
+Both halves matter and they check opposite things. The sheet's window sits partway down the screen, so its contents need translating; the picker's window sits at the screen origin, so its contents are **already correct** and must be left alone. A fix that shifts everything hosted passes the first half and fails the second.
+
+### #35 Start a simulator and open the login screen
+
+```
+start_simulator(id: "remote-test", type: "iPhone")
+install_app(id: "remote-test", app_path: "<repo>/testapp/build/MCPTestApp.app")
+launch_app(id: "remote-test", bundle_id: "com.example.mcptestapp")
+ui_tap(id: "remote-test", label: "Show Login")
+ui_tap(id: "remote-test", label: "Login Password")
+```
+
+**Expected:** The **"Use Strong Password?"** sheet slides up across the bottom of the screen.
+
+No device preparation is needed — no saved password, no Settings change, no software keyboard. If the sheet does not appear, the entitlement is missing from the build rather than the simulator being wrong; check with `otool -l testapp/build/MCPTestApp.app/MCPTestApp | grep -A2 __entitlements` and rebuild. A simulator whose password store has entries can also suppress it, by answering with a *fill* suggestion for a fuzzy-matched credential instead of generating one.
+
+### #36 ui_view — see where the sheet actually is
+
+```
+ui_view(id: "remote-test")
+```
+
+**Expected:** The sheet occupies roughly the bottom half of the screen. On a 402x874 device its "Fill Strong Password" button is near y≈737 and its ✕ near y≈507. **Read these off the screenshot** — they are the ground truth the next step is checked against, and the whole point is that the tree cannot be trusted to supply them.
+
+Let the sheet settle before believing the screenshot. A read taken during the presentation animation shows the sheet mid-flight and will not match a tree read taken a moment later.
+
+### #37 ui_find — the frame must be in screen space
+
+```
+ui_find(id: "remote-test", label: "Fill Strong Password")
+```
+
+**Expected:** A frame whose centre matches the screenshot — on a 402x874 device, `y: 715.33`, `height: 44`, so a centre of **737**.
+
+**The regression looks like `y: 239.33`**: the same rectangle measured from the sheet's own origin instead of the screen's, about 476 points too high. That number is not a magic constant to assert on — it is the hosting window's origin and moves with the sheet — so check the frame against the screenshot rather than against 715.33.
+
+### #38 ui_describe_point — the two tools must agree
+
+```
+ui_describe_point(id: "remote-test", x: 201, y: 737)
+```
+
+**Expected:** `Fill Strong Password`, with **the same frame `ui_find` reported**.
+
+Two distinct failures hide here. If it returns the wrong *element* — `ScrollArea`, or the login form — then the position is wrong. If it returns the right element with a frame that does not cover (201, 737), the tools disagree about one element, which is the defect [#58](TODO.md) was closed to prevent; a point read hit-tests and so is right about identity while having no ancestry to derive position from.
+
+### #39 ui_tap — the tap must land on the button
+
+```
+ui_tap(id: "remote-test", label: "Fill Strong Password")
+ui_view(id: "remote-test")
+```
+
+**Expected:** The sheet dismisses and the password field is **filled with a generated password** (a long row of dots).
+
+This is the step that matters most, because it is the one an agent actually takes. `Tapped successfully` is **not** a pass on its own — it was returned by the broken version too. Only the screenshot decides. If the login screen is unchanged, or the app has navigated because "Login Submit" was pressed instead, the fix has regressed.
+
+### #40 The control case — a picker must be left alone
+
+```
+launch_app(id: "remote-test", bundle_id: "com.example.mcptestapp", terminate_running: true)
+ui_tap(id: "remote-test", label: "Show Picker")
+ui_find(id: "remote-test", label: "Collections")
+```
+
+**Expected:** The photo picker opens, and `Collections` reports a frame in the nav bar near the top — on a 402x874 device, `{x: 201, y: 86, width: 95, height: 48}`.
+
+The picker is hosted by another process exactly as the sheet is, but its window is at the screen origin, so **these coordinates are already correct and must come back unchanged**. A frame pushed down the screen here means the translation is being applied blindly to anything hosted, rather than by how far the hosting window actually sits from the origin.
+
+### #41 ui_tap — the picker still taps correctly
+
+```
+ui_tap(id: "remote-test", label: "Collections")
+ui_view(id: "remote-test")
+```
+
+**Expected:** The picker switches to its Collections view — "Pinned", "Albums", "Shared Albums".
+
+### #42 Clean up
+
+```
+destroy_simulator(id: "remote-test")
+```
+
+**Expected:** Simulator destroyed.
+
+---
+
+## Part 4 — Round-trip timing
 
 Measures how long the **server** takes, with no model in the loop. Driving the tools through an agent measures the agent; this measures the tool.
 
@@ -391,6 +485,7 @@ time_tool ui_view           '{"id":"rtt"}'
 Two things to check rather than exact figures:
 
 - **`ui_tap` and `ui_describe_point` are fast** — single-digit milliseconds on an idle machine, and under 50 ms in any case. Past that, something is wrong with the companion connection, not with the tool. Both scale with what else the machine is doing: a busy Mac was measured at 5 ms and 22 ms for these two, with every other figure in the table up by the same factor.
+  - **`ui_describe_point` is the one to watch, and this row has caught a real regression.** It is the only cheap tool that can quietly become an expensive one, because it falls back to a whole-screen read when a frame looks like it belongs to a remote-hosted view (Part 3). Get that condition wrong and every point read pays ~300 ms while still returning the right answer, so nothing fails — the number here is the only thing that notices. A measurement of ~300 ms means the fallback is firing on ordinary elements; `isRemotelyHosted` in [src/ax/tree.ts](src/ax/tree.ts) is the thing to look at. It was measured at 313 ms once, because a hit-test at x=200 returns the home screen's Health icon, whose frame ends at x=188.67.
 - **Anything reading the whole screen costs ~300 ms**, because it reads the app's real view hierarchy. A `ui_find` that misses pays the same, since it falls back to that read. This is the reason to tap by name rather than describing the screen and picking coordinates.
 
 Discard the first call after a simulator starts — it includes connecting to the companion and runs an order of magnitude slower than the rest.
@@ -403,20 +498,20 @@ All tools tested:
 
 | Tool | Steps |
 |------|-------|
-| `start_simulator` | #1, #21, #23 |
-| `destroy_simulator` | #21, #22, #34 |
+| `start_simulator` | #1, #21, #23, #35 |
+| `destroy_simulator` | #21, #22, #34, #42 |
 | `attach_simulator` | #21 |
 | `rotate` | #26 |
 | `detect_rotation` | #27 |
 | `ui_describe_all` | #3, #10, #25, #29 |
-| `ui_find` | #11, #12, #13, #15, #30, #32, #33 |
-| `ui_tap` | #13, #14, #19, #30, #32, #33 |
+| `ui_find` | #11, #12, #13, #15, #30, #32, #33, #37, #40 |
+| `ui_tap` | #13, #14, #19, #30, #32, #33, #35, #39, #41 |
 | `ui_type` | #15, #33 |
 | `ui_swipe` | #5 |
-| `ui_describe_point` | #4, #16 |
-| `ui_view` | #2, #6, #9, #24, #28, #31 |
+| `ui_describe_point` | #4, #16, #38 |
+| `ui_view` | #2, #6, #9, #24, #28, #31, #36, #39, #41 |
 | `screenshot` | #17 |
 | `record_video` | #18 |
 | `stop_recording` | #20 |
-| `install_app` | #7, #23 |
-| `launch_app` | #8, #23 |
+| `install_app` | #7, #23, #35 |
+| `launch_app` | #8, #23, #35, #40 |

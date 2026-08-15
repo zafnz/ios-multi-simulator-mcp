@@ -6,9 +6,11 @@ import {
   canonicalise,
   centreOf,
   collectProbeCandidates,
+  distanceOutsideFrame,
   frameContains,
   isDegenerateTree,
   isInteresting,
+  isRemotelyHosted,
   locateInTree,
   matchInTree,
   normaliseForMatch,
@@ -468,6 +470,60 @@ test("locateInTree", async (t) => {
   await t.test("declines to guess without a frame to match against", () => {
     const element = { ...asPointRead(), frame: undefined };
     assert.equal(locateInTree(corrected(), element, 201, 737), null);
+  });
+});
+
+test("isRemotelyHosted", async (t) => {
+  // The regression this exists for, measured on the home screen: a point at
+  // x=200 hit-tests to the Health icon, whose frame ends at x=188.67. Treating
+  // that as a coordinate-space error sent every such read on a ~300ms detour.
+  await t.test("ordinary hit-slop is not a coordinate-space error", () => {
+    const health = { x: 120.67, y: 389, width: 68, height: 90.67 };
+    assert.equal(isRemotelyHosted(health, 200, 400), false);
+  });
+
+  // The autofill sheet's button, as the point read describes it, against the
+  // point it was actually touched at.
+  await t.test("a displaced frame is", () => {
+    const local = { x: 36, y: 239.33, width: 330, height: 44 };
+    assert.equal(isRemotelyHosted(local, 201, 737), true);
+  });
+
+  await t.test("a frame covering the point never is", () => {
+    const frame = { x: 0, y: 0, width: 100, height: 100 };
+    assert.equal(isRemotelyHosted(frame, 50, 50), false);
+  });
+
+  // A frame with no size carries no position to be wrong about, and offscreen
+  // home-screen icons have one.
+  await t.test("a zero-sized frame is not evidence", () => {
+    const frame = { x: 0, y: 0, width: 0, height: 0 };
+    assert.equal(isRemotelyHosted(frame, 200, 400), false);
+  });
+
+  await t.test("the boundary is the slop allowance", () => {
+    const frame = { x: 0, y: 0, width: 10, height: 10 };
+    assert.equal(isRemotelyHosted(frame, 10 + 44, 5), false);
+    assert.equal(isRemotelyHosted(frame, 10 + 45, 5), true);
+  });
+});
+
+test("distanceOutsideFrame", async (t) => {
+  const frame = { x: 10, y: 20, width: 100, height: 50 };
+
+  await t.test("is zero inside", () => {
+    assert.equal(distanceOutsideFrame(frame, 50, 40), 0);
+  });
+
+  await t.test("measures the axis that misses by most", () => {
+    assert.equal(distanceOutsideFrame(frame, 130, 40), 20);
+    assert.equal(distanceOutsideFrame(frame, 50, 100), 30);
+    assert.equal(distanceOutsideFrame(frame, 130, 100), 30);
+  });
+
+  await t.test("measures misses below and left too", () => {
+    assert.equal(distanceOutsideFrame(frame, 0, 40), 10);
+    assert.equal(distanceOutsideFrame(frame, 50, 0), 20);
   });
 });
 

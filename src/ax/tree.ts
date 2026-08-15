@@ -302,6 +302,54 @@ export function frameContains(frame: Frame, x: number, y: number): boolean {
 }
 
 /**
+ * How far outside its frame a point lies, along whichever axis misses by most.
+ * Zero when the point is inside.
+ */
+export function distanceOutsideFrame(
+  frame: Frame,
+  x: number,
+  y: number
+): number {
+  const dx = Math.max(frame.x - x, x - (frame.x + frame.width), 0);
+  const dy = Math.max(frame.y - y, y - (frame.y + frame.height), 0);
+  return Math.max(dx, dy);
+}
+
+/**
+ * How far a hit-test may legitimately land outside the frame it reports.
+ *
+ * A control's touchable region is routinely larger than its accessibility
+ * frame — Apple's own guidance is a 44pt minimum target, so a smaller control
+ * can be hit up to ~22pt beyond each edge. Measured on the home screen: a point
+ * at x=200 hit-tests to the Health icon, whose frame ends at x=188.67.
+ *
+ * This is a ceiling on ordinary overshoot, not a measurement of it, which is
+ * why it is the full 44 rather than half. See `isRemotelyHosted`.
+ */
+export const HIT_SLOP = 44;
+
+/**
+ * Whether a point read's answer looks like it came from a remote-hosted view —
+ * the same element, described in a coordinate space that is not the screen's.
+ *
+ * Distance is the whole test, and the margin is what makes it usable. "The
+ * frame does not cover the point" alone is not evidence of anything: it is true
+ * of any control whose touch target is bigger than its frame, which on the home
+ * screen is every icon, and treating it as the signal made a ~10ms point read
+ * cost ~310ms by sending it to look up an element that was never mislaid.
+ *
+ * A coordinate-space error is not a near miss. The autofill sheet's button is
+ * reported 476 points from where it was touched; ordinary overshoot is a dozen.
+ *
+ * A frame with no size is not evidence either — it carries no position to be
+ * wrong about, and offscreen elements have one.
+ */
+export function isRemotelyHosted(frame: Frame, x: number, y: number): boolean {
+  if (!frame.width && !frame.height) return false;
+  return distanceOutsideFrame(frame, x, y) > HIT_SLOP;
+}
+
+/**
  * Finds the corrected frame for an element a point read has located but
  * mislaid.
  *

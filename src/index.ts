@@ -18,8 +18,8 @@ import {
   canonicalise,
   centreOf,
   collectProbeCandidates,
-  frameContains,
   isDegenerateTree,
+  isRemotelyHosted,
   locateInTree,
   matchInTree,
   POINT_KEYS,
@@ -1823,13 +1823,13 @@ if (!isToolFiltered("ui_describe_point")) {
 
         let element = await describePoint(sim.udid, portraitX, portraitY);
 
-        // A frame that does not cover the point it was found at is the
-        // signature of a remote-hosted view: the hit-test is right, the frame
-        // is measured from the hosting window rather than the screen. The tree
-        // read that corrects it costs ~350ms, so it is paid only here, on the
-        // reads that are otherwise wrong — and only to replace the rectangle,
-        // never the identity, which the point read established by hit-testing.
-        if (element?.frame && !frameContains(element.frame, x, y)) {
+        // A frame nowhere near the point it was found at is the signature of a
+        // remote-hosted view: the hit-test is right, the frame is measured from
+        // the hosting window rather than the screen. The tree read that
+        // corrects it costs ~300ms, so it is paid only here, on the reads that
+        // are otherwise wrong — and only to replace the rectangle, never the
+        // identity, which the point read established by hit-testing.
+        if (element?.frame && isRemotelyHosted(element.frame, x, y)) {
           try {
             const corrected = locateInTree(
               await describeScreen(sim.udid),
