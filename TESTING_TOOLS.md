@@ -540,7 +540,7 @@ time_tool ui_view           '{"id":"rtt"}'
 
 | Call | Order of magnitude |
 |---|---|
-| `ui_tap` by coordinate | ~110 ms — a little over the 100 ms hold |
+| `ui_tap` by coordinate | **100–150 ms** — the 100 ms hold, plus the round trip |
 | `ui_describe_point` | under 50 ms |
 | `ui_find`, name present in the cheap tree | ~25 ms |
 | `ui_find`, name absent — falls back | ~300 ms |
@@ -549,7 +549,7 @@ time_tool ui_view           '{"id":"rtt"}'
 
 Two things to check rather than exact figures:
 
-- **`ui_tap` costs its own hold, and nothing else.** Every tap is held for 100 ms (`MIN_TAP_HOLD_SECONDS`), because an instantaneous touch actuates a control only about 40% of the time — see Part 4. So ~110 ms is the healthy figure and the ~10 ms of it that is not the hold is the actual round trip. A reading near 2 ms means the floor has been lost and taps have gone back to being unreliable; well above 110 ms means the companion connection is slow, not the tool.
+- **`ui_tap` costs its own hold, and nothing else. Expect 100–150 ms.** Every tap is held for 100 ms (`MIN_TAP_HOLD_SECONDS`), because an instantaneous touch actuates a control only about 40% of the time — see Part 4. Everything above the hold is the real round trip, so the healthy band is 100–150 ms and the interesting readings are outside it: **below 100 ms the floor has been lost** and taps are unreliable again, which no other check in this file would notice; well above 150 ms is a slow companion connection rather than the tool.
 - **`ui_describe_point` is fast** — single digits on an idle machine, under 50 ms in any case. It scales with what else the machine is doing: a busy Mac was measured at 22 ms, with every other figure in the table up by the same factor.
   - **`ui_describe_point` is the one to watch, and this row has caught a real regression.** It is the only cheap tool that can quietly become an expensive one, because it falls back to a whole-screen read when a frame looks like it belongs to a remote-hosted view (Part 3). Get that condition wrong and every point read pays ~300 ms while still returning the right answer, so nothing fails — the number here is the only thing that notices. A measurement of ~300 ms means the fallback is firing on ordinary elements; `isRemotelyHosted` in [src/ax/tree.ts](src/ax/tree.ts) is the thing to look at. It was measured at 313 ms once, because a hit-test at x=200 returns the home screen's Health icon, whose frame ends at x=188.67.
 - **Anything reading the whole screen costs ~300 ms**, because it reads the app's real view hierarchy. A `ui_find` that misses pays the same, since it falls back to that read. This is the reason to tap by name rather than describing the screen and picking coordinates.
